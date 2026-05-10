@@ -1,11 +1,14 @@
 const { chromium } = require('playwright-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const db = require('../config/database');
+const { resolveLogos } = require('../services/teamLogos');
 
 chromium.use(StealthPlugin());
 
-const BASE_URL = process.env.SOCO_BASE_URL || 'https://www.barbaramassaad.com';
-const LIST_URL = `${BASE_URL}/`;
+const BASE_URLS = [
+  process.env.SOCO_BASE_URL   || 'https://www.socolive.tv',
+  process.env.SOCO_BASE_URL_2 || 'https://www.barbaramassaad.com',
+].filter((u, i, a) => u && a.indexOf(u) === i); // deduplicate
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -56,7 +59,8 @@ const newBrowser = () =>
 
 // ─── Part 1: fetchMatchList ───────────────────────────────────────────────────
 
-const fetchMatchList = async () => {
+const fetchMatchList = async (baseUrl = BASE_URLS[0]) => {
+  const listUrl = `${baseUrl}/`;
   const browser = await newBrowser();
   const context = await browser.newContext({ userAgent: UA, viewport: { width: 1280, height: 720 } });
   const page    = await context.newPage();
@@ -72,8 +76,8 @@ const fetchMatchList = async () => {
   });
 
   try {
-    console.log(`[socolive] Loading match list: ${LIST_URL}`);
-    await page.goto(LIST_URL, { waitUntil: 'networkidle', timeout: 30000 });
+    console.log(`[socolive] Loading match list: ${listUrl}`);
+    await page.goto(listUrl, { waitUntil: 'networkidle', timeout: 30000 });
     await page.waitForSelector('.match-item', { timeout: 15000 }).catch(() => {});
 
     const matches = await page.$$eval('.match-item', (cards, baseUrl) =>
@@ -132,10 +136,10 @@ const fetchMatchList = async () => {
           elapsed_minutes,
         };
       }),
-      BASE_URL
+      baseUrl
     );
 
-    console.log(`[socolive] Found ${matches.length} matches`);
+    console.log(`[socolive] Found ${matches.length} matches on ${baseUrl}`);
     return matches;
   } finally {
     await context.close();
@@ -204,6 +208,10 @@ const saveMatchToDB = async (match) => {
   if (!tab_id) { console.warn('[socolive] soco-live tab not found'); return; }
 
   const scheduled_at = parseMatchTime(match.rawTime);
+  const { home_logo, away_logo } = await resolveLogos(
+    match.home_team, match.away_team, match.home_logo, match.away_logo
+  );
+  const league = match.competition || null;
 
   // Upsert match
   const existing = await db.query(
@@ -217,22 +225,24 @@ const saveMatchToDB = async (match) => {
     await db.query(
       `UPDATE matches
        SET status = $1, scheduled_at = $2,
-           score_home = $3, score_away = $4, elapsed_minutes = $5
-       WHERE id = $6`,
-      [match.status, scheduled_at, match.score_home, match.score_away, match.elapsed_minutes, matchId]
+           score_home = $3, score_away = $4, elapsed_minutes = $5,
+           home_logo = $6, away_logo = $7, league = $8
+       WHERE id = $9`,
+      [match.status, scheduled_at, match.score_home, match.score_away, match.elapsed_minutes,
+       home_logo, away_logo, league, matchId]
     );
   } else {
     const ins = await db.query(
       `INSERT INTO matches
-         (tab_id, title, home_team, away_team, home_logo, away_logo,
+         (tab_id, title, home_team, away_team, home_logo, away_logo, league,
           status, scheduled_at, source_match_id, source_name,
           score_home, score_away, elapsed_minutes, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'socolive',$10,$11,$12,now())
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'socolive',$11,$12,$13,now())
        RETURNING id`,
       [
         tab_id, match.title,
         match.home_team || '', match.away_team || '',
-        match.home_logo, match.away_logo,
+        home_logo, away_logo, league,
         match.status, scheduled_at,
         match.sourceId,
         match.score_home, match.score_away, match.elapsed_minutes
@@ -270,33 +280,49 @@ const saveMatchToDB = async (match) => {
 // ─── Part 5: run ─────────────────────────────────────────────────────────────
 
 const run = async () => {
-  try {
-    console.log('[socolive] Starting scrape…');
-    const matches = await fetchMatchList();
-    console.log(`[socolive] Processing ${matches.length} matches`);
+  console.log('[socolive] Starting scrape…');
 
-    for (const match of matches) {
-      try {
-        match.streams = [];
-
-        if (match.status === 'live' || isStartingSoon(match)) {
-          if (match.hasLive && match.matchUrl) {
-            match.streams = await fetchStreamUrls(match.matchUrl);
-            console.log(`[socolive] ${match.title}: ${match.streams.length} streams found`);
-          }
-        }
-
-        await saveMatchToDB(match);
-        await delay(2000, 4000);
-      } catch (err) {
-        console.error(`[socolive] Error processing "${match.title}":`, err.message);
+  // Try each base URL in order; move to next on failure or empty result
+  let matches = null;
+  for (const baseUrl of BASE_URLS) {
+    try {
+      const result = await fetchMatchList(baseUrl);
+      if (result && result.length > 0) {
+        matches = result;
+        break;
       }
+      console.warn(`[socolive] ${baseUrl} returned 0 matches, trying next URL…`);
+    } catch (err) {
+      console.warn(`[socolive] ${baseUrl} failed (${err.message}), trying next URL…`);
     }
-
-    console.log('[socolive] Scrape complete');
-  } catch (err) {
-    console.error('[socolive] Scrape failed:', err.message);
   }
+
+  if (!matches || matches.length === 0) {
+    console.error('[socolive] All source URLs failed or returned no matches');
+    return;
+  }
+
+  console.log(`[socolive] Processing ${matches.length} matches`);
+
+  for (const match of matches) {
+    try {
+      match.streams = [];
+
+      if (match.status === 'live' || isStartingSoon(match)) {
+        if (match.hasLive && match.matchUrl) {
+          match.streams = await fetchStreamUrls(match.matchUrl);
+          console.log(`[socolive] ${match.title}: ${match.streams.length} streams found`);
+        }
+      }
+
+      await saveMatchToDB(match);
+      await delay(2000, 4000);
+    } catch (err) {
+      console.error(`[socolive] Error processing "${match.title}":`, err.message);
+    }
+  }
+
+  console.log('[socolive] Scrape complete');
 };
 
 module.exports = { run, fetchMatchList, fetchStreamUrls, saveMatchToDB };

@@ -25,6 +25,7 @@ fastify.register(require('./routes/matches'));
 fastify.register(require('./routes/streams'));
 fastify.register(require('./routes/english'));
 fastify.register(require('./routes/servers'));
+fastify.register(require('./routes/proxy'));
 
 require('./jobs/syncMatches');
 require('./jobs/socoliveSyncJob');

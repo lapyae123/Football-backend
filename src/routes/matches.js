@@ -26,22 +26,13 @@ module.exports = async function (fastify, opts) {
       const result = await db.query(
         `SELECT m.id, m.title, m.home_team, m.away_team, m.home_logo, m.away_logo,
                 m.status, m.scheduled_at, m.score_home, m.score_away, m.elapsed_minutes,
-                m.league, t.slug AS source_tab
+                t.slug AS source_tab
          FROM matches m
          JOIN tabs t ON m.tab_id = t.id
          WHERE t.slug IN (${placeholders})
            AND t.is_active = TRUE
          ORDER BY
            CASE m.status WHEN 'live' THEN 0 WHEN 'scheduled' THEN 1 ELSE 2 END ASC,
-           CASE
-             WHEN m.league ILIKE '%champions league%' OR m.league ILIKE '%ucl%' THEN 0
-             WHEN m.league ILIKE '%premier league%'                              THEN 1
-             WHEN m.league ILIKE '%la liga%'                                     THEN 2
-             WHEN m.league ILIKE '%bundesliga%'                                  THEN 3
-             WHEN m.league ILIKE '%serie a%'                                     THEN 4
-             WHEN m.league ILIKE '%ligue 1%'                                     THEN 5
-             ELSE 9
-           END ASC,
            m.scheduled_at ASC
          LIMIT ${MAIN_LIVE_LIMIT}`,
         MAIN_LIVE_SOURCE_TABS

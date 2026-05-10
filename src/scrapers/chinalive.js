@@ -1,6 +1,5 @@
 const https = require('https');
 const db = require('../config/database');
-const { resolveLogos } = require('../services/teamLogos');
 
 const BASE_API = 'https://json.yyzb456.top';
 const REFERER  = 'https://yyzbw8.live/';
@@ -107,12 +106,12 @@ const getTabId = async () => {
 };
 
 const saveRoom = async (room, streams, tabId) => {
-  const { league, home_team, away_team } = parseTitle(room.title);
+  const { home_team, away_team } = parseTitle(room.title);
   const title = home_team && away_team ? `${home_team} vs ${away_team}` : room.title;
   const sourceId = String(room.roomNum);
-
-  const scrapedHomeLogo = room.cutOutCustomCoverUrl || room.cover || null;
-  const { home_logo, away_logo } = await resolveLogos(home_team, away_team, scrapedHomeLogo, null);
+  // Use room cover as home logo; away logo stays null (shows team initials)
+  const home_logo = room.cutOutCustomCoverUrl || room.cover || null;
+  const away_logo = null;
 
   const existing = await db.query(
     'SELECT id FROM matches WHERE source_match_id = $1 AND source_name = $2 LIMIT 1',
@@ -124,17 +123,17 @@ const saveRoom = async (room, streams, tabId) => {
     matchId = existing.rows[0].id;
     await db.query(
       `UPDATE matches SET status=$1, title=$2, home_team=$3, away_team=$4,
-       home_logo=$5, away_logo=$6, league=$7 WHERE id=$8`,
-      ['live', title, home_team || room.title, away_team || '', home_logo, away_logo, league || null, matchId]
+       home_logo=$5, away_logo=$6 WHERE id=$7`,
+      ['live', title, home_team || room.title, away_team || '', home_logo, away_logo, matchId]
     );
   } else {
     const ins = await db.query(
       `INSERT INTO matches
-         (tab_id, title, home_team, away_team, home_logo, away_logo, league, status, scheduled_at,
+         (tab_id, title, home_team, away_team, home_logo, away_logo, status, scheduled_at,
           source_match_id, source_name, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'live',now(),$8,'chinalive',now())
+       VALUES ($1,$2,$3,$4,$5,$6,'live',now(),$7,'chinalive',now())
        RETURNING id`,
-      [tabId, title, home_team || room.title, away_team || '', home_logo, away_logo, league || null, sourceId]
+      [tabId, title, home_team || room.title, away_team || '', home_logo, away_logo, sourceId]
     );
     matchId = ins.rows[0].id;
   }

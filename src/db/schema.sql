@@ -56,19 +56,6 @@ CREATE TABLE IF NOT EXISTS stream_urls (
 ALTER TABLE matches ADD COLUMN IF NOT EXISTS score_home SMALLINT;
 ALTER TABLE matches ADD COLUMN IF NOT EXISTS score_away SMALLINT;
 ALTER TABLE matches ADD COLUMN IF NOT EXISTS elapsed_minutes SMALLINT;
-ALTER TABLE matches ADD COLUMN IF NOT EXISTS league VARCHAR(255);
-
--- Team logos keyed by normalised team name (lowercase, no spaces/punctuation)
--- logo_url should point to a stable CDN (e.g. Wikipedia/Wikimedia) — no hotlink issues
-CREATE TABLE IF NOT EXISTS team_logos (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    team_name VARCHAR(255) NOT NULL,          -- display name e.g. "Manchester United"
-    team_key  VARCHAR(255) UNIQUE NOT NULL,   -- normalised key e.g. "manchesterunited"
-    logo_url  VARCHAR(500) NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT now()
-);
-
-CREATE INDEX IF NOT EXISTS idx_team_logos_key ON team_logos(team_key);
 
 CREATE INDEX IF NOT EXISTS idx_tabs_slug ON tabs(slug);
 CREATE INDEX IF NOT EXISTS idx_matches_tab_id ON matches(tab_id);

@@ -1,8 +1,6 @@
 const { Queue, Worker } = require('bullmq');
 const IORedis = require('ioredis');
-const db = require('../config/database');
 const redis = require('../config/redis');
-const { fetchMatches } = require('../services/streamedSu');
 
 const redisUrl = process.env.REDIS_URL;
 if (!redisUrl) {
@@ -24,81 +22,11 @@ const queue = new Queue(queueName, {
   defaultJobOptions: {
     removeOnComplete: true,
     attempts: 3,
-    backoff: {
-      type: 'exponential',
-      delay: 1000
-    }
+    backoff: { type: 'exponential', delay: 1000 }
   }
 });
 
-const syncMatchesHandler = async () => {
-  const sports = ['football', 'basketball'];
-
-  for (const sport of sports) {
-    try {
-      const matches = await fetchMatches(sport);
-
-      for (const match of matches) {
-        if (!match.source_match_id) continue;
-
-        const existing = await db.query(
-          'SELECT id FROM matches WHERE source_match_id = $1 LIMIT 1',
-          [match.source_match_id]
-        );
-
-        if (existing.rows.length > 0) {
-          await db.query(
-            `UPDATE matches SET
-              tab_id = $1,
-              title = $2,
-              home_team = $3,
-              away_team = $4,
-              home_logo = $5,
-              away_logo = $6,
-              status = $7,
-              scheduled_at = $8,
-              source_name = $9
-             WHERE id = $10`,
-            [
-              match.tab_id,
-              match.title,
-              match.home_team,
-              match.away_team,
-              match.home_logo,
-              match.away_logo,
-              match.status,
-              match.scheduled_at,
-              match.source_name,
-              existing.rows[0].id
-            ]
-          );
-        } else {
-          await db.query(
-            `INSERT INTO matches (
-              tab_id, title, home_team, away_team,
-              home_logo, away_logo, status,
-              scheduled_at, source_match_id, source_name, created_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())`,
-            [
-              match.tab_id,
-              match.title,
-              match.home_team,
-              match.away_team,
-              match.home_logo,
-              match.away_logo,
-              match.status,
-              match.scheduled_at,
-              match.source_match_id,
-              match.source_name
-            ]
-          );
-        }
-      }
-    } catch (err) {
-      console.error(`Failed to sync matches for ${sport}:`, err);
-    }
-  }
-
+const invalidateMatchCache = async () => {
   try {
     const tabsKeys = await redis.keys('tabs:all');
     const matchKeys = await redis.keys('matches:*');
@@ -107,22 +35,25 @@ const syncMatchesHandler = async () => {
     if (allKeys.length > 0) {
       await redis.del(...allKeys);
     }
+    console.log('syncMatches: cache invalidated');
   } catch (err) {
-    console.warn('Failed to invalidate Redis cache after sync', err);
+    console.warn('Failed to invalidate Redis cache', err);
   }
-
-  console.log('syncMatches job completed');
 };
 
-new Worker(queueName, async () => {
-  await syncMatchesHandler();
+// Worker placeholder — scraper jobs (SOCO, China) will dispatch work here
+new Worker(queueName, async (job) => {
+  if (job.name === 'invalidate-cache') {
+    await invalidateMatchCache();
+  }
 }, { connection });
 
 const scheduleSync = async () => {
-  await syncMatchesHandler();
+  await invalidateMatchCache();
+
   setInterval(async () => {
     try {
-      await queue.add('sync-matches-job', {}, { removeOnComplete: true });
+      await queue.add('invalidate-cache', {}, { removeOnComplete: true });
     } catch (err) {
       console.error('Failed to enqueue syncMatches job', err);
     }

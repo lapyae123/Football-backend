@@ -6,17 +6,20 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "db:migrate": "node src/db/migrate.js"
+    "db:migrate": "node src/db/migrate.js",
+    "test": "node src/tests/api.test.js"
   },
   "dependencies": {
-    "fastify": "^4.26.0",
     "@fastify/cors": "^8.5.0",
     "@fastify/env": "^4.3.0",
-    "pg": "^8.11.3",
-    "ioredis": "^5.3.2",
     "bullmq": "^4.15.0",
-    "playwright": "^1.40.1",
     "dotenv": "^16.3.1",
+    "fastify": "^4.26.0",
+    "ioredis": "^5.3.2",
+    "pg": "^8.11.3",
+    "playwright": "^1.40.1",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "uuid": "^9.0.1"
   },
   "devDependencies": {

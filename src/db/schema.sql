@@ -53,6 +53,10 @@ CREATE TABLE IF NOT EXISTS stream_urls (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS score_home SMALLINT;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS score_away SMALLINT;
+ALTER TABLE matches ADD COLUMN IF NOT EXISTS elapsed_minutes SMALLINT;
+
 CREATE INDEX IF NOT EXISTS idx_tabs_slug ON tabs(slug);
 CREATE INDEX IF NOT EXISTS idx_matches_tab_id ON matches(tab_id);
 CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status);

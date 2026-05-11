@@ -48,17 +48,24 @@ module.exports = async function (fastify, opts) {
       );
       matches = result.rows;
     } else {
+      // All non-main-live queries return the same canonical shape as main-live:
+      // source_tab and league are always present so the frontend never needs special-casing.
       const query = tab
         ? `SELECT m.id, m.title, m.home_team, m.away_team, m.home_logo, m.away_logo,
-                  m.status, m.scheduled_at, m.score_home, m.score_away, m.elapsed_minutes
+                  m.status, m.scheduled_at, m.score_home, m.score_away, m.elapsed_minutes,
+                  m.league, t.slug AS source_tab
            FROM matches m
            JOIN tabs t ON m.tab_id = t.id
            WHERE t.slug = $1
-           ORDER BY m.scheduled_at ASC`
-        : `SELECT id, title, home_team, away_team, home_logo, away_logo,
-                  status, scheduled_at, score_home, score_away, elapsed_minutes
-           FROM matches
-           ORDER BY scheduled_at ASC`;
+           ORDER BY
+             CASE m.status WHEN 'live' THEN 0 WHEN 'scheduled' THEN 1 ELSE 2 END ASC,
+             m.scheduled_at ASC`
+        : `SELECT m.id, m.title, m.home_team, m.away_team, m.home_logo, m.away_logo,
+                  m.status, m.scheduled_at, m.score_home, m.score_away, m.elapsed_minutes,
+                  m.league, t.slug AS source_tab
+           FROM matches m
+           JOIN tabs t ON m.tab_id = t.id
+           ORDER BY m.scheduled_at ASC`;
 
       const params = tab ? [tab] : [];
       const result = await db.query(query, params);

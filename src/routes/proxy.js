@@ -32,11 +32,17 @@ module.exports = async function (fastify) {
     const timer = setTimeout(() => controller.abort(), 8000);
 
     try {
+      const REFERER_MAP = {
+        'sta.yyzb456.top': 'https://yyzbw8.live/',
+      };
+      const referer = REFERER_MAP[parsed.hostname] || null;
+
       const res = await fetch(url, {
         signal: controller.signal,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
           'Accept':     'image/*,*/*;q=0.8',
+          ...(referer ? { 'Referer': referer } : {}),
         },
       });
 

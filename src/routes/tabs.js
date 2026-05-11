@@ -15,7 +15,8 @@ module.exports = async function (fastify, opts) {
     }
 
     const result = await db.query(
-      'SELECT id, name, slug, position, is_active FROM tabs WHERE is_active = TRUE ORDER BY position ASC'
+      `SELECT id, name, slug, position, icon, color, description, config, is_active
+       FROM tabs WHERE is_active = TRUE ORDER BY position ASC`
     );
 
     const tabs = result.rows;

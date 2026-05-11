@@ -1,8 +1,9 @@
 const db = require('../config/database');
-const { run: rerunSoco } = require('../scrapers/socolive');
+const { run: rerunSoco }  = require('../scrapers/socolive');
+const { run: rerunChina } = require('../scrapers/chinalive');
 
-const CHECK_INTERVAL_MS = parseInt(process.env.HEALTH_CHECK_INTERVAL_MS, 10) || 2 * 60 * 1000;
-const FAIL_THRESHOLD    = parseInt(process.env.HEALTH_FAIL_THRESHOLD, 10)    || 3;
+const CHECK_INTERVAL_MS = parseInt(process.env.HEALTH_CHECK_INTERVAL_MS, 10) || 10 * 60 * 1000;
+const FAIL_THRESHOLD    = parseInt(process.env.HEALTH_FAIL_THRESHOLD, 10)    || 10;
 const FETCH_TIMEOUT_MS  = 8000;
 
 const checkUrl = async (url) => {
@@ -27,6 +28,11 @@ const checkUrl = async (url) => {
   }
 };
 
+const tryRerun = async (fn, label) => {
+  console.log(`[urlHealthJob] Re-scraping ${label}…`);
+  try { await fn(); } catch (err) { console.error(`[urlHealthJob] ${label} re-scrape failed:`, err.message); }
+};
+
 const runHealthCheck = async () => {
   console.log('[urlHealthJob] Starting health check…');
 
@@ -48,9 +54,10 @@ const runHealthCheck = async () => {
 
   console.log(`[urlHealthJob] Checking ${streams.length} streams…`);
 
-  const failedMatchIds = new Set();
+  let socoFailed  = false;
+  let chinaFailed = false;
 
-  for (const stream of streams) {
+  await Promise.all(streams.map(async (stream) => {
     const { ok, latency } = await checkUrl(stream.url);
     const newFailCount = ok ? 0 : stream.fail_count + 1;
 
@@ -66,20 +73,15 @@ const runHealthCheck = async () => {
 
     if (!ok) {
       console.warn(`[urlHealthJob] UNHEALTHY: ${stream.url} (fail_count=${newFailCount})`);
-      if (newFailCount >= FAIL_THRESHOLD && stream.source_name === 'socolive') {
-        failedMatchIds.add(stream.match_id);
+      if (newFailCount >= FAIL_THRESHOLD) {
+        if (stream.source_name === 'socolive')  socoFailed  = true;
+        if (stream.source_name === 'chinalive') chinaFailed = true;
       }
     }
-  }
+  }));
 
-  if (failedMatchIds.size > 0) {
-    console.log(`[urlHealthJob] Re-scraping ${failedMatchIds.size} match(es) with failed streams…`);
-    try {
-      await rerunSoco();
-    } catch (err) {
-      console.error('[urlHealthJob] Re-scrape failed:', err.message);
-    }
-  }
+  if (socoFailed)  await tryRerun(rerunSoco,  'socolive');
+  if (chinaFailed) await tryRerun(rerunChina, 'chinalive');
 
   console.log('[urlHealthJob] Health check complete');
 };

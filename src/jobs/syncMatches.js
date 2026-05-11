@@ -28,10 +28,10 @@ const queue = new Queue(queueName, {
 
 const invalidateMatchCache = async () => {
   try {
-    const tabsKeys = await redis.keys('tabs:all');
-    const matchKeys = await redis.keys('matches:*');
+    const tabsKeys   = await redis.keys('tabs:all');
+    const matchKeys  = await redis.keys('matches:*');
     const streamKeys = await redis.keys('streams:*');
-    const allKeys = [...tabsKeys, ...matchKeys, ...streamKeys];
+    const allKeys    = [...tabsKeys, ...matchKeys, ...streamKeys, 'config:all'];
     if (allKeys.length > 0) {
       await redis.del(...allKeys);
     }

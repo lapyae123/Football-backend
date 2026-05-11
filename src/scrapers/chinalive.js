@@ -2,15 +2,28 @@ const https = require('https');
 const db = require('../config/database');
 const { resolveLogos } = require('../services/teamLogos');
 
-const BASE_API = 'https://json.yyzb456.top';
-const REFERER  = 'https://yyzbw8.live/';
-const UA       = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
+const CHINA_DEFAULTS = {
+  api_base: 'https://json.yyzb456.top',
+  referer:  'https://yyzbw8.live/',
+};
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36';
+
+const getSourceConfig = async () => {
+  try {
+    const r = await db.query(
+      "SELECT config FROM sources WHERE slug = 'chinalive' AND is_active = true LIMIT 1"
+    );
+    const cfg = r.rows[0]?.config;
+    if (cfg?.api_base) return { api_base: cfg.api_base, referer: cfg.referer || CHINA_DEFAULTS.referer };
+  } catch (_) {}
+  return CHINA_DEFAULTS;
+};
 
 // ─── HTTP helper ─────────────────────────────────────────────────────────────
 
-const get = (url) => new Promise((resolve, reject) => {
+const get = (url, referer = CHINA_DEFAULTS.referer) => new Promise((resolve, reject) => {
   const req = https.get(url, {
-    headers: { 'User-Agent': UA, 'Referer': REFERER },
+    headers: { 'User-Agent': UA, 'Referer': referer },
     timeout: 10000,
   }, (res) => {
     let body = '';
@@ -60,18 +73,57 @@ const parseTitle = (raw) => {
 
 // ─── Fetch list ───────────────────────────────────────────────────────────────
 
-const fetchRooms = async () => {
-  const url = `${BASE_API}/all_live_rooms.json?v=${Date.now()}`;
-  const text = await get(url);
+const STA_BASE = 'https://sta.yyzb456.top';
+
+// Ensure logo URLs are absolute (some come back as "/file/imgs/..." relative paths)
+const absoluteLogo = (url) => {
+  if (!url) return null;
+  return url.startsWith('http') ? url : `${STA_BASE}${url.startsWith('/') ? '' : '/'}${url}`;
+};
+
+// Fetch today's match schedule and return a map of roomNum → match metadata
+const fetchSchedule = async (baseApi = CHINA_DEFAULTS.api_base, referer = CHINA_DEFAULTS.referer) => {
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const url  = `${baseApi}/match/matches_${date}.json?v=${Date.now()}`;
+  try {
+    const text = await get(url, referer);
+    const json = parseJsonp(text);
+    const matches = json.data || [];
+
+    const index = new Map(); // roomNum → schedule entry
+    for (const m of matches) {
+      for (const anchor of m.anchors || []) {
+        const roomNum = String(anchor.anchor?.roomNum || anchor.roomNum || '');
+        if (roomNum) {
+          index.set(roomNum, {
+            scheduleId: m.scheduleId,
+            league:     m.subCateName  || null,
+            home_team:  m.hostName     || null,
+            away_team:  m.guestName    || null,
+            home_logo:  absoluteLogo(m.hostIcon),
+            away_logo:  absoluteLogo(m.guestIcon),
+          });
+        }
+      }
+    }
+    console.log(`[chinalive] Schedule loaded: ${matches.length} matches, ${index.size} room entries`);
+    return index;
+  } catch (err) {
+    console.warn(`[chinalive] Schedule fetch failed: ${err.message}`);
+    return new Map();
+  }
+};
+
+const fetchRooms = async (baseApi = CHINA_DEFAULTS.api_base, referer = CHINA_DEFAULTS.referer) => {
+  const url = `${baseApi}/all_live_rooms.json?v=${Date.now()}`;
+  const text = await get(url, referer);
   const json = parseJsonp(text);
   if (json.code !== 200) throw new Error(`API error: ${json.msg}`);
 
-  // data is an object keyed "0","1",... each value is an array of rooms
   const rooms = [];
   for (const arr of Object.values(json.data || {})) {
     if (Array.isArray(arr)) rooms.push(...arr);
   }
-  // Only live rooms (liveStatus=1), sports category (liveTypeParent=1)
   return rooms.filter((r) => r.liveStatus === 1 && r.liveTypeParent === 1);
 };
 
@@ -83,12 +135,31 @@ const fetchStreams = async (roomNum) => {
     const text = await get(url);
     const json = parseJsonp(text);
     if (json.code !== 200) return [];
-    const s = json.data?.stream || {};
+    const s    = json.data?.stream || {};
+    const seen = new Set();
     const urls = [];
-    if (s.hdM3u8)  urls.push({ url: s.hdM3u8, quality: 'HD' });
-    if (s.m3u8)    urls.push({ url: s.m3u8,   quality: 'SD' });
-    if (s.hdFlv)   urls.push({ url: s.hdFlv,  quality: 'HD' });
-    if (s.flv)     urls.push({ url: s.flv,    quality: 'SD' });
+
+    const add = (val, quality) => {
+      if (val && typeof val === 'string' && !seen.has(val)) {
+        seen.add(val);
+        urls.push({ url: val, quality });
+      }
+    };
+
+    // Known priority fields first
+    add(s.hdM3u8, 'HD');
+    add(s.m3u8,   'SD');
+    add(s.hdFlv,  'HD');
+    add(s.flv,    'SD');
+
+    // Scan every remaining string field for any m3u8 / flv URL
+    for (const [key, val] of Object.entries(s)) {
+      if (typeof val !== 'string') continue;
+      if (!val.includes('.m3u8') && !val.includes('.flv')) continue;
+      const isHD = /hd|high|1080|720/i.test(key) || /hd|high|1080|720/i.test(val);
+      add(val, isHD ? 'HD' : 'SD');
+    }
+
     return urls;
   } catch (err) {
     console.warn(`[chinalive] Stream fetch failed for room ${roomNum}: ${err.message}`);
@@ -106,13 +177,30 @@ const getTabId = async () => {
   return cachedTabId;
 };
 
-const saveRoom = async (room, streams, tabId) => {
-  const { league, home_team, away_team } = parseTitle(room.title);
-  const title = home_team && away_team ? `${home_team} vs ${away_team}` : room.title;
+const saveRoom = async (room, streams, tabId, schedule) => {
   const sourceId = String(room.roomNum);
+  const sched    = schedule?.get(sourceId);
 
-  const scrapedHomeLogo = room.cutOutCustomCoverUrl || room.cover || null;
-  const { home_logo, away_logo } = await resolveLogos(home_team, away_team, scrapedHomeLogo, null);
+  // Prefer schedule data (has proper team names + logos); fall back to title parsing
+  let home_team, away_team, league, home_logo, away_logo;
+  if (sched) {
+    home_team = sched.home_team || '';
+    away_team = sched.away_team || '';
+    league    = sched.league;
+    home_logo = sched.home_logo;
+    away_logo = sched.away_logo;
+  } else {
+    const parsed   = parseTitle(room.title);
+    home_team      = parsed.home_team;
+    away_team      = parsed.away_team;
+    league         = parsed.league || null;
+    const cover    = room.cutOutCustomCoverUrl || room.cover || null;
+    const resolved = await resolveLogos(home_team, away_team, cover, cover);
+    home_logo      = resolved.home_logo;
+    away_logo      = resolved.away_logo;
+  }
+
+  const title = home_team && away_team ? `${home_team} vs ${away_team}` : room.title;
 
   const existing = await db.query(
     'SELECT id FROM matches WHERE source_match_id = $1 AND source_name = $2 LIMIT 1',
@@ -183,23 +271,26 @@ const run = async () => {
   const tabId = await getTabId();
   if (!tabId) { console.warn('[chinalive] china-live tab not found'); return; }
 
-  let rooms;
-  try {
-    rooms = await fetchRooms();
-    console.log(`[chinalive] Found ${rooms.length} live sport rooms`);
-  } catch (err) {
-    console.error('[chinalive] Failed to fetch room list:', err.message);
-    return;
-  }
+  const { api_base, referer } = await getSourceConfig();
+
+  // Fetch schedule and rooms in parallel
+  const [schedule, rooms] = await Promise.all([
+    fetchSchedule(api_base, referer),
+    fetchRooms(api_base, referer).catch((err) => { console.error('[chinalive] Failed to fetch room list:', err.message); return null; }),
+  ]);
+  if (!rooms) return;
+  console.log(`[chinalive] Found ${rooms.length} live sport rooms`);
 
   const activeIds = [];
 
   for (const room of rooms) {
     try {
       const streams = await fetchStreams(room.roomNum);
-      await saveRoom(room, streams, tabId);
+      await saveRoom(room, streams, tabId, schedule);
       activeIds.push(String(room.roomNum));
-      console.log(`[chinalive] Saved "${room.title}" (${streams.length} streams)`);
+      const sched = schedule.get(String(room.roomNum));
+      const label = sched ? `${sched.home_team} vs ${sched.away_team}` : room.title;
+      console.log(`[chinalive] Saved "${label}" (${streams.length} streams)`);
     } catch (err) {
       console.error(`[chinalive] Error processing room ${room.roomNum}:`, err.message);
     }

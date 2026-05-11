@@ -20,9 +20,11 @@ fastify.register(require('@fastify/cors'), {
   origin: true
 });
 
+fastify.register(require('./routes/config'));
 fastify.register(require('./routes/tabs'));
 fastify.register(require('./routes/matches'));
 fastify.register(require('./routes/streams'));
+fastify.register(require('./routes/admin'));
 fastify.register(require('./routes/english'));
 fastify.register(require('./routes/servers'));
 fastify.register(require('./routes/proxy'));

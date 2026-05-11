@@ -73,7 +73,8 @@ const invalidateCache = async () => {
   try {
     const keys = [
       ...(await redis.keys('matches:*')),
-      ...(await redis.keys('streams:*'))
+      ...(await redis.keys('streams:*')),
+      'config:all',
     ];
     if (keys.length > 0) await redis.del(...keys);
   } catch (err) {

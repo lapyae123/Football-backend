@@ -1,8 +1,7 @@
 FROM node:20-slim
 
-# Playwright / Chromium system dependencies
+# System dependencies required by Playwright's Chromium
 RUN apt-get update && apt-get install -y \
-    chromium \
     fonts-noto \
     fonts-noto-cjk \
     fonts-liberation \
@@ -10,14 +9,13 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Tell Playwright to use the system Chromium instead of downloading its own
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
-
 WORKDIR /app
 
 COPY package*.json ./
 RUN npm ci --omit=dev
+
+# Let Playwright download its own Chromium (matches the exact version it expects)
+RUN npx playwright install chromium --with-deps
 
 COPY src ./src
 

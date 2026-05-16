@@ -4,7 +4,7 @@ const { run } = require('../scrapers/socolive');
 
 const SLUG     = 'socolive';
 const TAB_SLUG = 'soco-live';
-const DEFAULT_INTERVAL_MS = parseInt(process.env.SOCO_SYNC_INTERVAL_MS, 10) || 5 * 60 * 1000;
+const DEFAULT_INTERVAL_MS = parseInt(process.env.SOCO_SYNC_INTERVAL_MS, 10) || 2 * 60 * 1000;
 
 let timer = null;
 

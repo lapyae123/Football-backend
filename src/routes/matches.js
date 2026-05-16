@@ -1,7 +1,7 @@
 const db = require('../config/database');
 const redis = require('../config/redis');
 
-const MAIN_LIVE_SOURCE_TABS = ['soco-live', 'china-live', 'loungsan'];
+const MAIN_LIVE_SOURCE_TABS = ['soco-live'];
 const MAIN_LIVE_LIMIT = 15;
 
 module.exports = async function (fastify, opts) {

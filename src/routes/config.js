@@ -29,6 +29,7 @@ module.exports = async function (fastify) {
       features: appConfig.features || {},
       ui:       appConfig.ui       || {},
       limits:   appConfig.limits   || {},
+      ads:      appConfig.ads      || { enabled: false, publisher_id: '', pages: [], slots: {} },
     };
 
     try {

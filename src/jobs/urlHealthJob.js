@@ -24,14 +24,22 @@ const checkUrl = async (url) => {
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   const start = Date.now();
   try {
-    const res = await fetch(url, {
+    // Try HEAD first; fall back to GET with Range (some CDNs reject HEAD)
+    let res = await fetch(url, {
       method: 'HEAD',
       signal: controller.signal,
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
-      }
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36' }
     });
+    if (res.status === 405 || res.status === 403) {
+      res = await fetch(url, {
+        method: 'GET',
+        signal: controller.signal,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+          'Range': 'bytes=0-1',
+        }
+      });
+    }
     const ok = res.ok || res.status === 206;
     return { ok, latency: ok ? Date.now() - start : null };
   } catch (_) {
@@ -108,11 +116,35 @@ const expireOldUrls = async () => {
   if (rowCount > 0) console.log(`[urlHealthJob] Expired ${rowCount} stream URL(s)`);
 };
 
+const cleanStaleMatches = async () => {
+  // Scheduled matches whose kickoff passed 2+ hours ago → finished
+  const { rowCount: r1 } = await db.query(
+    `UPDATE matches SET status = 'finished'
+     WHERE status = 'scheduled' AND scheduled_at < NOW() - INTERVAL '2 hours'`
+  );
+  // Stuck live matches: kickoff was 4+ hours ago (covers 90min + HT + extra time)
+  const { rowCount: r3 } = await db.query(
+    `UPDATE matches SET status = 'finished'
+     WHERE status = 'live'
+       AND scheduled_at IS NOT NULL
+       AND scheduled_at < NOW() - INTERVAL '4 hours'`
+  );
+  // Delete finished matches older than 3 days to keep DB lean
+  const { rowCount: r2 } = await db.query(
+    `DELETE FROM matches
+     WHERE status = 'finished' AND created_at < NOW() - INTERVAL '3 days'`
+  );
+  if (r1 > 0) console.log(`[urlHealthJob] Marked ${r1} stale scheduled → finished`);
+  if (r3 > 0) console.log(`[urlHealthJob] Marked ${r3} stuck live → finished`);
+  if (r2 > 0) console.log(`[urlHealthJob] Deleted ${r2} old finished matches`);
+};
+
 const start = () => {
   const tick = async () => {
     try {
       const { intervalMs, failThreshold } = await getHealthConfig();
       await expireOldUrls();
+      await cleanStaleMatches();
       await runHealthCheck(failThreshold);
       setTimeout(tick, intervalMs);
     } catch (err) {

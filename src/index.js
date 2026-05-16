@@ -28,10 +28,13 @@ fastify.register(require('./routes/admin'));
 fastify.register(require('./routes/english'));
 fastify.register(require('./routes/servers'));
 fastify.register(require('./routes/proxy'));
+fastify.register(require('./routes/tv'));
 
 require('./jobs/syncMatches');
 require('./jobs/socoliveSyncJob');
 require('./jobs/chinaliveSyncJob');
+require('./jobs/xoilacSyncJob');
+// myanmarTvSyncJob disabled — streams are geo-restricted; URLs must be entered manually via Admin → TV & Radio
 require('./jobs/urlHealthJob');
 
 fastify.get('/health', async () => ({ status: 'ok' }));

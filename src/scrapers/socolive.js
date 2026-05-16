@@ -44,11 +44,20 @@ const getBaseUrls = async () => {
 
 const saveDiscoveredUrl = async (url) => {
   try {
+    // Prepend to existing base_urls instead of overwriting — preserves all fallbacks
     await db.query(
       `UPDATE sources
-       SET config = jsonb_set(config, '{base_urls}', $1::jsonb)
+       SET config = jsonb_set(
+         config, '{base_urls}',
+         to_jsonb(ARRAY(
+           SELECT DISTINCT u FROM unnest(
+             ARRAY[$1] || ARRAY(SELECT jsonb_array_elements_text(config->'base_urls'))
+           ) AS u
+           LIMIT 6
+         ))
+       )
        WHERE slug = 'socolive'`,
-      [JSON.stringify([url, DISCOVERY_URL])]
+      [url]
     );
     console.log(`[socolive] Auto-saved new mirror to DB: ${url}`);
   } catch (err) {
@@ -152,20 +161,24 @@ const fetchMatchList = async (baseUrl) => {
           for (const stage of stages) {
             for (const event of (stage.Events || [])) {
               const status = event.Eps ?? event.status ?? 0;
+              const startMs = event.Esd
+                ? (event.Esd > 1e12 ? event.Esd : event.Esd * 1000)
+                : null;
               matches.push({
-                sourceId:   String(event.Eid || event.id || ''),
-                title:      `${event.T1?.[0]?.Nm || ''} vs ${event.T2?.[0]?.Nm || ''}`,
-                home_team:  event.T1?.[0]?.Nm  || '',
-                away_team:  event.T2?.[0]?.Nm  || '',
-                home_logo:  event.T1?.[0]?.Img ? `https://lsm-static-prod.livescore.com/medium/${event.T1[0].Img}` : null,
-                away_logo:  event.T2?.[0]?.Img ? `https://lsm-static-prod.livescore.com/medium/${event.T2[0].Img}` : null,
-                league:     stage.Snm || null,
-                status:     LIVE_STATUSES.has(status) ? 'live' : 'scheduled',
-                score_home: event.Tr1 != null ? +event.Tr1 : null,
-                score_away: event.Tr2 != null ? +event.Tr2 : null,
-                elapsed:    event.Esd ? Math.floor((Date.now() - event.Esd) / 60000) : null,
-                matchPath:  event.slug || event.Scd || null,
-                isLive:     LIVE_STATUSES.has(status),
+                sourceId:     String(event.Eid || event.id || ''),
+                title:        `${event.T1?.[0]?.Nm || ''} vs ${event.T2?.[0]?.Nm || ''}`,
+                home_team:    event.T1?.[0]?.Nm  || '',
+                away_team:    event.T2?.[0]?.Nm  || '',
+                home_logo:    event.T1?.[0]?.Img ? `https://lsm-static-prod.livescore.com/medium/${event.T1[0].Img}` : null,
+                away_logo:    event.T2?.[0]?.Img ? `https://lsm-static-prod.livescore.com/medium/${event.T2[0].Img}` : null,
+                league:       stage.Snm || null,
+                status:       LIVE_STATUSES.has(status) ? 'live' : 'scheduled',
+                score_home:   event.Tr1 != null ? +event.Tr1 : null,
+                score_away:   event.Tr2 != null ? +event.Tr2 : null,
+                elapsed:      startMs ? Math.max(0, Math.floor((Date.now() - startMs) / 60000)) : null,
+                scheduled_at: startMs ? new Date(startMs).toISOString() : null,
+                matchPath:    event.slug || event.Scd || null,
+                isLive:       LIVE_STATUSES.has(status),
               });
             }
           }
@@ -185,7 +198,8 @@ const fetchMatchList = async (baseUrl) => {
         route.continue();
       });
 
-      await page.goto(baseUrl, { waitUntil: 'networkidle', timeout: 30000 });
+      await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page.waitForTimeout(3000); // allow XHR to fire after DOM loads
 
       // If XHR interception got nothing, fall back to DOM scraping
       if (matches.length === 0) {
@@ -264,10 +278,9 @@ const classifyQuality = (url) => /hd|720|1080|high/i.test(url) ? 'HD' : 'SD';
 
 const parseTokenExpiry = (url) => {
   const m = url.match(/auth_key=(\d{10})/);
-  if (m) {
-    const expMs = parseInt(m[1], 10) * 1000;
-    if (expMs > Date.now()) return new Date(expMs).toISOString();
-  }
+  // Always return the actual CDN expiry — even if already past — so the DB
+  // expires_at reflects reality and expireOldUrls() filters it correctly.
+  if (m) return new Date(parseInt(m[1], 10) * 1000).toISOString();
   return null;
 };
 
@@ -325,12 +338,45 @@ const fetchStreamUrls = async (matchUrl) => {
   }
 };
 
+// ─── Parse raw time string → ISO timestamp ────────────────────────────────────
+// Handles formats like "21:00", "21:00 15/05", "15/05 21:00"
+
+// ICT offset = UTC+7 (Vietnam/Thailand — the timezone SOCO displays)
+const ICT_OFFSET_MS = 7 * 60 * 60 * 1000;
+
+const parseMatchTime = (raw) => {
+  if (!raw) return null;
+  try {
+    const m = raw.match(/(\d{1,2}):(\d{2})(?:.*?(\d{1,2})\/(\d{1,2}))?/);
+    if (!m) return null;
+    // Use current time in ICT to fill in missing date parts
+    const nowIct  = new Date(Date.now() + ICT_OFFSET_MS);
+    const hour    = parseInt(m[1], 10);
+    const min     = parseInt(m[2], 10);
+    const day     = m[3] ? parseInt(m[3], 10)     : nowIct.getUTCDate();
+    const month   = m[4] ? parseInt(m[4], 10) - 1 : nowIct.getUTCMonth();
+    const year    = nowIct.getUTCFullYear();
+    // Treat parsed time as ICT: build as-if-UTC then subtract ICT offset
+    const d = new Date(Date.UTC(year, month, day, hour, min, 0) - ICT_OFFSET_MS);
+    // If more than 12h in the past assume it is tomorrow
+    if (d.getTime() < Date.now() - 12 * 60 * 60 * 1000) {
+      d.setUTCDate(d.getUTCDate() + 1);
+    }
+    return d.toISOString();
+  } catch (_) { return null; }
+};
+
 // ─── Part 3: saveMatchToDB ────────────────────────────────────────────────────
 
 const saveMatchToDB = async (match, tabId) => {
   const { home_logo, away_logo } = await resolveLogos(
     match.home_team, match.away_team, match.home_logo, match.away_logo
   );
+
+  // Parse scheduled_at from raw time string or XHR timestamp
+  const scheduledAt = match.scheduled_at
+    || parseMatchTime(match.rawTime)
+    || (match.Esd ? new Date(match.Esd).toISOString() : null);
 
   const existing = await db.query(
     'SELECT id FROM matches WHERE source_match_id = $1 AND source_name = $2 LIMIT 1',
@@ -342,23 +388,38 @@ const saveMatchToDB = async (match, tabId) => {
     matchId = existing.rows[0].id;
     await db.query(
       `UPDATE matches
-         SET status = $1, score_home = $2, score_away = $3,
-             elapsed_minutes = $4, home_logo = $5, away_logo = $6,
-             league = COALESCE($7, league)
+         SET status          = CASE
+               WHEN status = 'finished' THEN 'finished'
+               ELSE $1
+             END,
+             score_home      = $2,
+             score_away      = $3,
+             elapsed_minutes = $4,
+             home_logo       = $5,
+             away_logo       = $6,
+             league          = COALESCE($7, league),
+             scheduled_at    = COALESCE($9, scheduled_at)
        WHERE id = $8`,
       [match.status, match.score_home, match.score_away,
-       match.elapsed ?? null, home_logo, away_logo, match.league || null, matchId]
+       match.elapsed ?? null, home_logo, away_logo,
+       match.league || null, matchId, scheduledAt]
     );
   } else {
+    // Don't insert past-scheduled matches (kicked off 2+ hours ago)
+    if (match.status === 'scheduled' && scheduledAt) {
+      if (new Date(scheduledAt) < new Date(Date.now() - 2 * 60 * 60 * 1000)) return;
+    }
     const ins = await db.query(
       `INSERT INTO matches
          (tab_id, title, home_team, away_team, home_logo, away_logo, league,
-          status, source_match_id, source_name, score_home, score_away, elapsed_minutes, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'socolive',$10,$11,$12,now())
+          status, scheduled_at, source_match_id, source_name,
+          score_home, score_away, elapsed_minutes, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'socolive',$11,$12,$13,now())
        RETURNING id`,
       [tabId, match.title, match.home_team, match.away_team,
        home_logo, away_logo, match.league, match.status,
-       match.sourceId, match.score_home, match.score_away, match.elapsed]
+       scheduledAt, match.sourceId,
+       match.score_home, match.score_away, match.elapsed ?? null]
     );
     matchId = ins.rows[0].id;
   }
@@ -395,7 +456,8 @@ const saveMatchToDB = async (match, tabId) => {
 
 const markFinished = async (activeSourceIds, tabId) => {
   if (!tabId) return;
-  // Primary: mark by source_match_id not in current scrape
+  // Mark finished only if match has been live for 2.5+ hours (covers 90min + HT + extra time)
+  // This prevents prematurely finishing a match just because SOCO anchors paused streaming
   if (activeSourceIds.length) {
     const placeholders = activeSourceIds.map((_, i) => `$${i + 2}`).join(',');
     await db.query(
@@ -403,17 +465,18 @@ const markFinished = async (activeSourceIds, tabId) => {
        WHERE tab_id = $1
          AND source_name = 'socolive'
          AND status = 'live'
-         AND source_match_id NOT IN (${placeholders})`,
+         AND source_match_id NOT IN (${placeholders})
+         AND (scheduled_at IS NULL OR scheduled_at < NOW() - INTERVAL '2 hours 30 minutes')`,
       [tabId, ...activeSourceIds]
     );
   }
-  // Safety net: any socolive live match not updated in 15+ min is stale
+  // Safety net: stale live match with no streams for 3+ hours
   await db.query(
     `UPDATE matches SET status = 'finished'
      WHERE tab_id = $1
        AND source_name = 'socolive'
        AND status = 'live'
-       AND created_at < NOW() - INTERVAL '15 minutes'`,
+       AND (scheduled_at IS NULL OR scheduled_at < NOW() - INTERVAL '3 hours')`,
     [tabId]
   );
 };
@@ -487,7 +550,11 @@ const run = async () => {
   }
 
   // Mark matches from previous scrapes that are no longer live as finished
-  await markFinished(activeIds, tabId);
+  try {
+    await markFinished(activeIds, tabId);
+  } catch (err) {
+    console.error('[socolive] markFinished error (non-fatal):', err.message);
+  }
 
   console.log('[socolive] Scrape complete');
 };

@@ -1,6 +1,7 @@
-const jwt   = require('jsonwebtoken');
-const db    = require('../config/database');
-const redis = require('../config/redis');
+const jwt        = require('jsonwebtoken');
+const db         = require('../config/database');
+const redis      = require('../config/redis');
+const scraperLog = require('../config/scraperLog');
 const { run: runChinalive } = require('../scrapers/chinalive');
 const { run: runSocolive  } = require('../scrapers/socolive');
 
@@ -455,8 +456,8 @@ module.exports = async function adminRoutes(fastify) {
       return { slug, status: 'already_running' };
     }
 
-    // Mark running — auto-expires in 5 min as safety net
-    await redis.set(`scraper:running:${slug}`, Date.now().toString(), 'EX', 300).catch(() => {});
+    scraperLog.clear(slug);
+    await redis.set(`scraper:running:${slug}`, Date.now().toString(), 'EX', 600).catch(() => {});
     await redis.set(`scraper:last_run:${slug}`, Date.now().toString()).catch(() => {});
 
     const saveResult = (status, message = null) =>
@@ -472,6 +473,15 @@ module.exports = async function adminRoutes(fastify) {
 
     reply.code(202);
     return { slug, status: 'started' };
+  });
+
+  // ── Scraper: live logs ─────────────────────────────────────────────────────
+  fastify.get('/api/admin/scrapers/:slug/logs', { preHandler: requireJwt }, async (request) => {
+    const { slug }  = request.params;
+    const since     = parseInt(request.query.since || '0', 10);
+    const lines     = scraperLog.read(slug, since);
+    const running   = !!(await redis.get(`scraper:running:${slug}`).catch(() => null));
+    return { slug, running, lines };
   });
 
   // ── Scraper: status check ──────────────────────────────────────────────────

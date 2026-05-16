@@ -1,19 +1,13 @@
-const IORedis = require('ioredis');
-
 if (!process.env.REDIS_URL) {
-  throw new Error('REDIS_URL is required in environment variables');
+  console.warn('[redis] REDIS_URL not set — using in-memory cache');
+  module.exports = require('./memcache');
+} else {
+  const IORedis = require('ioredis');
+  const options = { maxRetriesPerRequest: null };
+  if (process.env.REDIS_URL.startsWith('rediss://') || process.env.REDIS_TLS === 'true') {
+    options.tls = { rejectUnauthorized: false };
+  }
+  const client = new IORedis(process.env.REDIS_URL, options);
+  client.on('error', (err) => console.error('[redis] error:', err.message));
+  module.exports = client;
 }
-
-const options = {
-  maxRetriesPerRequest: null
-};
-if (process.env.REDIS_URL.startsWith('rediss://') || process.env.REDIS_TLS === 'true') {
-  options.tls = { rejectUnauthorized: false };
-}
-
-const redisClient = new IORedis(process.env.REDIS_URL, options);
-redisClient.on('error', (err) => {
-  console.error('Redis error', err);
-});
-
-module.exports = redisClient;

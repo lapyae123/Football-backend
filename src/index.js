@@ -1,17 +1,19 @@
 require('dotenv').config();
+require('./config/scraperLog'); // intercept console before any scraper runs
+
 const fastify = require('fastify')({ logger: true });
 
 fastify.register(require('@fastify/env'), {
   dotenv: false,
   schema: {
     type: 'object',
-    required: ['DATABASE_URL', 'REDIS_URL', 'PORT', 'NODE_ENV'],
+    required: ['DATABASE_URL', 'PORT', 'NODE_ENV'],
     properties: {
       DATABASE_URL: { type: 'string' },
-      REDIS_URL: { type: 'string' },
-      PORT: { type: 'number', default: 3050 },
-      NODE_ENV: { type: 'string', default: 'development' },
-      ADMIN_API_KEY: { type: 'string', default: '' }
+      REDIS_URL:    { type: 'string', default: '' },
+      PORT:         { type: 'number', default: 3050 },
+      NODE_ENV:     { type: 'string', default: 'development' },
+      ADMIN_API_KEY:{ type: 'string', default: '' }
     }
   }
 });

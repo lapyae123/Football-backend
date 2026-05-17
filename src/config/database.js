@@ -12,20 +12,32 @@ pool.on('error', (err) => {
   console.error('PostgreSQL pool error (will reconnect):', err.message);
 });
 
-// Retry wrapper — Neon serverless can drop idle connections mid-flight (ECONNRESET).
-// On connection errors we wait briefly and retry with a fresh connection.
+// Neon serverless pauses after inactivity and drops connections (ECONNRESET).
+// Use pool.connect() so we can destroy dead connections and force fresh ones.
 const CONNECTION_ERRORS = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT', '57P01', '08006', '08001']);
 
+const isConnErr = (err) =>
+  CONNECTION_ERRORS.has(err.code) ||
+  /ECONNRESET|EPIPE|Connection terminated|terminating connection|server closed/i.test(err.message || '');
+
 const query = async (text, params) => {
-  const maxAttempts = 3;
+  const maxAttempts = 4;
   let lastErr;
   for (let i = 0; i < maxAttempts; i++) {
+    let client;
     try {
-      return await pool.query(text, params);
+      client = await pool.connect();
+      // Suppress unhandled 'error' events on the checked-out client —
+      // these fire when Neon drops the connection mid-query and would
+      // otherwise crash the process as an uncaught exception.
+      client.on('error', () => {});
+      const result = await client.query(text, params);
+      client.release();
+      return result;
     } catch (err) {
-      const isConnErr = CONNECTION_ERRORS.has(err.code) || err.message?.includes('ECONNRESET');
-      if (isConnErr && i < maxAttempts - 1) {
-        await new Promise((r) => setTimeout(r, 150 * (i + 1)));
+      if (client) client.release(true); // destroy bad connection
+      if (isConnErr(err) && i < maxAttempts - 1) {
+        await new Promise((r) => setTimeout(r, 800 * (i + 1)));
         lastErr = err;
         continue;
       }

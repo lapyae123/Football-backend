@@ -5,8 +5,9 @@ const scraperLog   = require('../config/scraperLog');
 const scraperState = require('../config/scraperState');
 const { run: runChinalive } = require('../scrapers/chinalive');
 const { run: runSocolive  } = require('../scrapers/socolive');
+const { run: runXoilac    } = require('../scrapers/xoilac');
 
-const SCRAPER_RUNNERS = { chinalive: runChinalive, socolive: runSocolive };
+const SCRAPER_RUNNERS = { chinalive: runChinalive, socolive: runSocolive, xoilac: runXoilac };
 
 const JWT_SECRET   = process.env.JWT_SECRET        || 'football-admin-secret-dev';
 const ADMIN_USER   = process.env.ADMIN_USERNAME    || 'admin';
@@ -400,30 +401,18 @@ module.exports = async function adminRoutes(fastify) {
       `SELECT id, name, slug, is_active FROM sources WHERE slug IN ('chinalive','socolive') ORDER BY name`
     );
 
-    const tabMap = { chinalive: 'china-live', socolive: 'soco-live' };
-
-    const scrapers = await Promise.all(
-      rows.map(async (s) => {
-        const tabSlug = tabMap[s.slug];
-        const [lastRunRaw, lastResultRaw, runningRaw] = await Promise.all([
-          redis.get(`scraper:last_run:${s.slug}`).catch(() => null),
-          redis.get(`scraper:last_result:${s.slug}`).catch(() => null),
-          redis.get(`scraper:running:${s.slug}`).catch(() => null),
-        ]);
-        const lastResult = lastResultRaw ? JSON.parse(lastResultRaw) : null;
-        return {
-          id:          s.id,
-          name:        s.name,
-          slug:        s.slug,
-          is_active:   s.is_active,
-          running:     !!runningRaw,
-          last_run_at: lastRunRaw ? new Date(parseInt(lastRunRaw, 10)).toISOString() : null,
-          last_result: lastResult,
-        };
-      })
-    );
-
-    return scrapers;
+    return rows.map((s) => {
+      const state = scraperState.get(s.slug);
+      return {
+        id:          s.id,
+        name:        s.name,
+        slug:        s.slug,
+        is_active:   s.is_active,
+        running:     state.running    ?? false,
+        last_run_at: state.lastRunAt  ? new Date(state.lastRunAt).toISOString()  : null,
+        last_result: state.lastResult ?? null,
+      };
+    });
   });
 
   fastify.post('/api/admin/scrapers/:slug/toggle', { preHandler: requireJwt }, async (request, reply) => {
@@ -447,27 +436,33 @@ module.exports = async function adminRoutes(fastify) {
   // ── Scraper: trigger manual run ────────────────────────────────────────────
   fastify.post('/api/admin/scrapers/:slug/run', { preHandler: requireJwt }, async (request, reply) => {
     const { slug } = request.params;
-    if (!SCRAPER_RUNNERS[slug]) {
-      reply.code(400);
-      return { error: 'Unknown scraper slug' };
+    try {
+      if (!SCRAPER_RUNNERS[slug]) {
+        reply.code(400);
+        return { error: 'Unknown scraper slug' };
+      }
+
+      if (scraperState.isRunning(slug)) {
+        return { slug, status: 'already_running' };
+      }
+
+      scraperLog.clear(slug);
+      scraperState.start(slug);
+
+      SCRAPER_RUNNERS[slug]()
+        .then(() => scraperState.finish(slug, 'ok'))
+        .catch((err) => {
+          console.error(`[admin] Manual scrape ${slug} failed:`, err.message);
+          scraperState.finish(slug, 'error', err.message);
+        });
+
+      reply.code(202);
+      return { slug, status: 'started' };
+    } catch (err) {
+      console.error(`[admin] Run scraper ${slug} error:`, err.message);
+      reply.code(500);
+      return { error: err.message || 'Failed to start scraper' };
     }
-
-    if (scraperState.isRunning(slug)) {
-      return { slug, status: 'already_running' };
-    }
-
-    scraperLog.clear(slug);
-    scraperState.start(slug);
-
-    SCRAPER_RUNNERS[slug]()
-      .then(() => scraperState.finish(slug, 'ok'))
-      .catch((err) => {
-        console.error(`[admin] Manual scrape ${slug} failed:`, err.message);
-        scraperState.finish(slug, 'error', err.message);
-      });
-
-    reply.code(202);
-    return { slug, status: 'started' };
   });
 
   // ── Scraper: live logs ─────────────────────────────────────────────────────

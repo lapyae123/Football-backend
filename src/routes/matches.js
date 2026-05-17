@@ -18,6 +18,15 @@ module.exports = async function (fastify, opts) {
       fastify.log.warn('Redis cache miss for matches', err);
     }
 
+    // Auto-promote scheduled → live for any match whose kick-off time has passed.
+    // Runs before the query so the returned data is always consistent with real time.
+    await db.query(
+      `UPDATE matches SET status = 'live'
+       WHERE status = 'scheduled'
+         AND scheduled_at IS NOT NULL
+         AND scheduled_at <= NOW()`
+    ).catch(() => {});
+
     let matches;
 
     if (tab === 'main-live') {
@@ -62,7 +71,8 @@ module.exports = async function (fastify, opts) {
            WHERE t.slug = $1
            ORDER BY
              CASE m.status WHEN 'live' THEN 0 WHEN 'scheduled' THEN 1 ELSE 2 END ASC,
-             m.scheduled_at ASC`
+             m.scheduled_at ASC NULLS LAST,
+             m.created_at ASC`
         : `SELECT m.id, m.title, m.home_team, m.away_team, m.home_logo, m.away_logo,
                   m.status, m.scheduled_at, m.score_home, m.score_away, m.elapsed_minutes,
                   m.league, t.slug AS source_tab

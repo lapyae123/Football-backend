@@ -314,19 +314,21 @@ const saveMatch = async (data, tabId) => {
       "SELECT id FROM stream_urls WHERE match_id=$1 AND split_part(url,'?',1)=split_part($2,'?',1) LIMIT 1",
       [dbMatchId, url]
     );
+    // Channel proxy URLs (livepingscorex.com) are fetched fresh at play time — keep 3h
+    const ttl = url.includes('livepingscorex.com') ? '3 hours' : '50 minutes';
     if (ex.rows.length === 0) {
       await db.query(
         `INSERT INTO stream_urls
            (match_id, url, quality, source_name, priority, is_healthy, expires_at, created_at)
-         VALUES ($1,$2,$3,'xoilac',$4,true,NOW()+interval '50 minutes',now())`,
-        [dbMatchId, url, quality, priority]
+         VALUES ($1,$2,$3,'xoilac',$4,true,NOW()+$5::interval,now())`,
+        [dbMatchId, url, quality, priority, ttl]
       );
     } else {
       await db.query(
         `UPDATE stream_urls
-           SET url=$1, priority=$2, expires_at=NOW()+interval '50 minutes', is_healthy=true
-         WHERE id=$3`,
-        [url, priority, ex.rows[0].id]
+           SET url=$1, priority=$2, quality=$3, expires_at=NOW()+$4::interval, is_healthy=true
+         WHERE id=$5`,
+        [url, priority, quality, ttl, ex.rows[0].id]
       );
     }
   }
@@ -334,26 +336,55 @@ const saveMatch = async (data, tabId) => {
 
 const markFinished = async (activeIds, tabId) => {
   if (!tabId) return;
+
+  // Mark live matches that disappeared from the active list as finished.
+  // Matches in extra time (statusId 5,6,7) stay in activeIds → NOT touched here.
   if (activeIds.length > 0) {
     const ph = activeIds.map((_, i) => `$${i + 2}`).join(',');
     await db.query(
-      `UPDATE matches SET status='finished'
-       WHERE tab_id=$1 AND source_name='xoilac' AND status='live'
+      `UPDATE matches SET status = 'finished'
+       WHERE tab_id = $1 AND source_name = 'xoilac' AND status = 'live'
          AND source_match_id NOT IN (${ph})`,
       [tabId, ...activeIds]
     );
+  } else {
+    await db.query(
+      `UPDATE matches SET status = 'finished'
+       WHERE tab_id = $1 AND source_name = 'xoilac' AND status = 'live'`,
+      [tabId]
+    );
   }
+
+  // Delete finished matches — keep result visible 15 min then remove
   await db.query(
-    `UPDATE matches SET status='finished'
-     WHERE tab_id=$1 AND source_name='xoilac' AND status='live'
-       AND scheduled_at < NOW() - INTERVAL '4 hours'`,
+    `DELETE FROM matches
+     WHERE tab_id = $1 AND source_name = 'xoilac' AND status = 'finished'
+       AND scheduled_at < NOW() - INTERVAL '15 minutes'`,
+    [tabId]
+  );
+
+  // Hard safety-net: 150 min covers 90 min + stoppage + extra time (30) + penalties (20)
+  await db.query(
+    `DELETE FROM matches
+     WHERE tab_id = $1 AND source_name = 'xoilac'
+       AND scheduled_at < NOW() - INTERVAL '150 minutes'`,
     [tabId]
   );
 };
 
-// ─── Detect quality from URL ──────────────────────────────────────────────────
-const detectQuality = (url = '') => {
+// ─── Detect quality ───────────────────────────────────────────────────────────
+// Checks final stream URL first, then falls back to the channel proxy URL type.
+// On xoilacz, /type/3/ and /type/5/ = HD (POLO HD / LINK HD buttons).
+// The final CDN URL often has no "hd" keyword so the proxy type is the reliable signal.
+const HD_PROXY_TYPES = new Set([3, 5]);
+
+const detectQuality = (url = '', proxyUrl = '') => {
   if (/hd|high|1080|720/i.test(url)) return 'HD';
+  // procdnlive.com (no "2") = HD CDN; pro2cdnlive.com = SD CDN
+  if (/procdnlive\.com/.test(url) && !/pro2cdnlive\.com/.test(url)) return 'HD';
+  // Channel proxy type: /type/3/ and /type/5/ are HD buttons on xoilacz
+  const typeMatch = proxyUrl.match(/\/type\/(\d+)\//);
+  if (typeMatch && HD_PROXY_TYPES.has(parseInt(typeMatch[1], 10))) return 'HD';
   return 'SD';
 };
 
@@ -405,8 +436,10 @@ const run = async () => {
           const parsed = parseMatchPage(matchHtml);
           for (const channelUrl of parsed.streamUrls.slice(0, 4)) {
             await jitter(200, 600);
+            // Fetch CDN URL only to detect quality — store the channel proxy URL so the
+            // FLV proxy can always get a fresh auth_key at play time (CDN keys expire fast).
             const streamUrl = await fetchStreamUrl(channelUrl, cfg.referer);
-            if (streamUrl) streams.push({ url: streamUrl, quality: detectQuality(streamUrl) });
+            if (streamUrl) streams.push({ url: channelUrl, quality: detectQuality(streamUrl, channelUrl) });
           }
         }
       }

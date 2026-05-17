@@ -4,7 +4,7 @@ const { run }      = require('../scrapers/xoilac');
 
 const SLUG     = 'xoilac';
 const TAB_SLUG = 'xoilac';
-const DEFAULT_INTERVAL_MS = parseInt(process.env.SCRAPER_INTERVAL_MS, 10) || 5 * 60 * 1000;
+const DEFAULT_INTERVAL_MS = parseInt(process.env.SCRAPER_INTERVAL_MS, 10) || 2 * 60 * 1000;
 
 const shouldRun = async () => {
   try {

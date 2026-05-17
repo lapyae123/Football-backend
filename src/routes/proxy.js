@@ -8,6 +8,7 @@ const STREAM_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 const REFERER_BY_SOURCE = {
   chinalive: 'https://yyzbw8.live/',
   socolive:  'https://www.socolive.tv/',
+  xoilac:    'https://xoilacct.tv/',
 };
 
 module.exports = async function (fastify) {
@@ -233,6 +234,146 @@ module.exports = async function (fastify) {
     } finally {
       clearTimeout(timer);
     }
+  });
+
+  // ─── FLV stream proxy ─────────────────────────────────────────────────────────
+  // Pipes the live FLV binary through the server so the correct Referer is sent
+  // and the browser receives CORS headers. Cannot buffer (stream is infinite).
+  fastify.get('/api/proxy/flv/:id', async (request, reply) => {
+    const { id } = request.params;
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!UUID_RE.test(id)) { reply.code(400); return { error: 'Invalid id' }; }
+
+    const { rows } = await db.query(
+      'SELECT url, source_name FROM stream_urls WHERE id = $1 LIMIT 1', [id]
+    );
+    if (!rows.length) { reply.code(404); return { error: 'Stream not found' }; }
+
+    let { url: streamUrl, source_name } = rows[0];
+    let referer = REFERER_BY_SOURCE[source_name] || 'https://xoilacct.tv/';
+
+    // Xoilac stores the channel proxy URL (xl365.livepingscorex.com).
+    // Fetch a fresh CDN URL from it, then use that domain as the Referer when
+    // piping — the CDN validates Referer against xl365.livepingscorex.com, not xoilacct.tv.
+    // NOTE: fetch() uses the macOS system resolver which can't always resolve this domain;
+    // https.get() uses Node.js's own DNS module which works reliably.
+    if (streamUrl.includes('livepingscorex.com')) {
+      const channelProxyOrigin = new URL(streamUrl).origin; // https://xl365.livepingscorex.com
+      const channelHtml = await new Promise((res, rej) => {
+        const parsed = new URL(streamUrl);
+        const req    = https.get({
+          hostname: parsed.hostname,
+          path:     parsed.pathname + parsed.search,
+          headers:  { 'User-Agent': STREAM_UA, 'Referer': channelProxyOrigin + '/' },
+          timeout:  8000,
+        }, (r) => {
+          let body = '';
+          r.setEncoding('utf8');
+          r.on('data', (c) => { body += c; });
+          r.on('end',  () => res(body));
+        });
+        req.on('error',   rej);
+        req.on('timeout', () => { req.destroy(); rej(new Error('timeout')); });
+      }).catch((e) => {
+        console.error('[proxy/flv] channel proxy fetch failed:', e.code || e.message);
+        return null;
+      });
+
+      if (!channelHtml) { reply.code(502); return { error: 'Channel proxy unreachable' }; }
+      const m = channelHtml.match(/var urlStream\s*=\s*"([^"]+)"/);
+      if (!m?.[1]) { reply.code(502); return { error: 'No stream URL in proxy response' }; }
+      streamUrl = m[1];
+      referer   = channelProxyOrigin + '/'; // CDN checks this Referer
+    }
+
+    // The channel proxy can return either FLV or m3u8 — handle both.
+    // All xoilac CDNs have mismatched SSL certs, so rejectUnauthorized:false is required.
+    const https = require('https');
+    const http  = require('http');
+    const sslAgent = new https.Agent({ rejectUnauthorized: false });
+
+    if (/\.m3u8(\?|$)/i.test(streamUrl)) {
+      // ── m3u8 path: fetch playlist, rewrite segment URLs, serve with CORS ───────
+      const m3u8Body = await new Promise((resolve, reject) => {
+        const proto = streamUrl.startsWith('https') ? https : http;
+        const req   = proto.get(streamUrl, {
+          agent: sslAgent,
+          headers: { 'User-Agent': STREAM_UA, 'Referer': referer },
+          timeout: 10000,
+        }, (res) => {
+          if (res.statusCode !== 200) {
+            res.resume();
+            return reject(Object.assign(new Error('CDN error'), { status: res.statusCode }));
+          }
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (c) => { body += c; });
+          res.on('end',  () => resolve(body));
+        });
+        req.on('error',   reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+      }).catch((err) => { throw err; });
+
+      const base     = new URL(streamUrl);
+      const basePath = base.href.substring(0, base.href.lastIndexOf('/') + 1);
+      const apiBase  = `${request.protocol}://${request.headers.host}`;
+      let m3u8 = m3u8Body.replace(/^([^#\r\n].+)$/gm, (line) => {
+        const abs = line.startsWith('http') ? line
+                  : line.startsWith('/')    ? `${base.origin}${line}`
+                  : `${basePath}${line}`;
+        return abs.includes('.m3u8') ? `${apiBase}/api/proxy/flv/${id}` : abs;
+      });
+      return reply
+        .header('Content-Type', 'application/vnd.apple.mpegurl')
+        .header('Cache-Control', 'no-store, no-cache')
+        .header('Access-Control-Allow-Origin', '*')
+        .send(m3u8);
+    }
+
+    // ── FLV path: pipe binary stream with rejectUnauthorized:false ───────────────
+    const proto = streamUrl.startsWith('https') ? https : http;
+
+    return new Promise((resolve) => {
+      const req = proto.get(
+        streamUrl,
+        {
+          agent: sslAgent,
+          headers: {
+            'User-Agent': STREAM_UA,
+            'Referer':    referer,
+            'Origin':     new URL(referer).origin,
+            'Accept':     '*/*',
+          },
+        },
+        (upstream) => {
+          if (upstream.statusCode !== 200) {
+            db.query('UPDATE stream_urls SET is_healthy=false WHERE id=$1', [id]).catch(() => {});
+            reply.code(502).send({ error: `CDN ${upstream.statusCode}` });
+            upstream.resume();
+            return resolve();
+          }
+
+          reply.raw.writeHead(200, {
+            'Content-Type':                'video/x-flv',
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control':               'no-cache, no-store',
+            'Transfer-Encoding':           'chunked',
+          });
+
+          upstream.pipe(reply.raw);
+          reply.raw.on('finish', resolve);
+          reply.raw.on('close',  resolve);
+          reply.raw.on('error',  resolve);
+        }
+      );
+
+      req.on('error', () => {
+        if (!reply.raw.headersSent) reply.code(502).send({ error: 'CDN unreachable' });
+        resolve();
+      });
+
+      request.raw.on('close', () => req.destroy());
+    });
   });
 
   fastify.get('/api/proxy/logo', async (request, reply) => {

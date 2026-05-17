@@ -36,12 +36,16 @@ module.exports = async function (fastify, opts) {
     const grouped = { SD: [], HD: [] };
     for (const row of rows) {
       const q = row.quality === 'HD' ? 'HD' : 'SD';
-      // m3u8 streams go through the proxy so auth_key refreshes transparently on every playlist fetch.
-      // FLV streams are proxied as a direct redirect since we can't easily proxy the continuous stream.
-      const isM3u8 = row.url.includes('.m3u8');
+      // m3u8 → proxy/stream (rewrites playlist, handles auth_key refresh)
+      // flv / xoilac channel proxy → proxy/flv (fetches fresh CDN URL + pipes with Referer/CORS)
+      const isM3u8    = row.url.includes('.m3u8');
+      const isFlv     = /\.flv(\?|$)/i.test(row.url) || row.url.includes('livepingscorex.com');
+      const proxyUrl  = isM3u8 ? `${apiBase}/api/proxy/stream/${row.id}`
+                      : isFlv  ? `${apiBase}/api/proxy/flv/${row.id}`
+                      : row.url;
       grouped[q].push({
         id:           row.id,
-        url:          isM3u8 ? `${apiBase}/api/proxy/stream/${row.id}` : row.url,
+        url:          proxyUrl,
         source_name:  row.source_name,
         priority:     row.priority,
         latency_ms:   row.latency_ms,

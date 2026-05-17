@@ -79,6 +79,16 @@ const runHealthCheck = async (failThreshold) => {
   let chinaFailed = false;
 
   await Promise.all(streams.map(async (stream) => {
+    // Xoilac channel proxy URLs return HTML (not stream data) — skip direct health check.
+    // The FLV proxy fetches a fresh CDN URL at play time, so these are always "healthy".
+    if (stream.url.includes('livepingscorex.com')) {
+      await db.query(
+        'UPDATE stream_urls SET last_checked = NOW() WHERE id = $1',
+        [stream.id]
+      );
+      return;
+    }
+
     const { ok, latency } = await checkUrl(stream.url);
     const newFailCount = ok ? 0 : stream.fail_count + 1;
 

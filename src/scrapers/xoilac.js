@@ -314,8 +314,8 @@ const saveMatch = async (data, tabId) => {
       "SELECT id FROM stream_urls WHERE match_id=$1 AND split_part(url,'?',1)=split_part($2,'?',1) LIMIT 1",
       [dbMatchId, url]
     );
-    // Channel proxy URLs (livepingscorex.com) are fetched fresh at play time — keep 3h
-    const ttl = url.includes('livepingscorex.com') ? '3 hours' : '50 minutes';
+    // CDN URLs have auth_key — scraper refreshes every 2 min, keep 10 min TTL
+    const ttl = '10 minutes';
     if (ex.rows.length === 0) {
       await db.query(
         `INSERT INTO stream_urls
@@ -436,10 +436,10 @@ const run = async () => {
           const parsed = parseMatchPage(matchHtml);
           for (const channelUrl of parsed.streamUrls.slice(0, 4)) {
             await jitter(200, 600);
-            // Fetch CDN URL only to detect quality — store the channel proxy URL so the
-            // FLV proxy can always get a fresh auth_key at play time (CDN keys expire fast).
+            // Save the actual CDN URL (not the channel proxy) — proxy/flv can pipe it
+            // directly without needing to reach livepingscorex.com at play time.
             const streamUrl = await fetchStreamUrl(channelUrl, cfg.referer);
-            if (streamUrl) streams.push({ url: channelUrl, quality: detectQuality(streamUrl, channelUrl) });
+            if (streamUrl) streams.push({ url: streamUrl, quality: detectQuality(streamUrl, channelUrl) });
           }
         }
       }

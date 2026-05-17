@@ -7,8 +7,8 @@ const STREAM_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 
 const REFERER_BY_SOURCE = {
   chinalive: 'https://yyzbw8.live/',
-  socolive:  'https://www.socolive.tv/',
-  xoilac:    'https://xoilacct.tv/',
+  socolive:  'https://socolivexx.tv/',
+  xoilac:    'https://xl365.livepingscorex.com/',
 };
 
 module.exports = async function (fastify) {
@@ -249,45 +249,11 @@ module.exports = async function (fastify) {
     );
     if (!rows.length) { reply.code(404); return { error: 'Stream not found' }; }
 
-    let { url: streamUrl, source_name } = rows[0];
-    let referer = REFERER_BY_SOURCE[source_name] || 'https://xoilacct.tv/';
+    const { url: streamUrl, source_name } = rows[0];
+    const referer = REFERER_BY_SOURCE[source_name] || 'https://xoilacct.tv/';
 
-    // Xoilac stores the channel proxy URL (xl365.livepingscorex.com).
-    // Fetch a fresh CDN URL from it, then use that domain as the Referer when
-    // piping — the CDN validates Referer against xl365.livepingscorex.com, not xoilacct.tv.
-    // NOTE: fetch() uses the macOS system resolver which can't always resolve this domain;
-    // https.get() uses Node.js's own DNS module which works reliably.
-    if (streamUrl.includes('livepingscorex.com')) {
-      const channelProxyOrigin = new URL(streamUrl).origin; // https://xl365.livepingscorex.com
-      const channelHtml = await new Promise((res, rej) => {
-        const parsed = new URL(streamUrl);
-        const req    = https.get({
-          hostname: parsed.hostname,
-          path:     parsed.pathname + parsed.search,
-          headers:  { 'User-Agent': STREAM_UA, 'Referer': channelProxyOrigin + '/' },
-          timeout:  8000,
-        }, (r) => {
-          let body = '';
-          r.setEncoding('utf8');
-          r.on('data', (c) => { body += c; });
-          r.on('end',  () => res(body));
-        });
-        req.on('error',   rej);
-        req.on('timeout', () => { req.destroy(); rej(new Error('timeout')); });
-      }).catch((e) => {
-        console.error('[proxy/flv] channel proxy fetch failed:', e.code || e.message);
-        return null;
-      });
-
-      if (!channelHtml) { reply.code(502); return { error: 'Channel proxy unreachable' }; }
-      const m = channelHtml.match(/var urlStream\s*=\s*"([^"]+)"/);
-      if (!m?.[1]) { reply.code(502); return { error: 'No stream URL in proxy response' }; }
-      streamUrl = m[1];
-      referer   = channelProxyOrigin + '/'; // CDN checks this Referer
-    }
-
-    // The channel proxy can return either FLV or m3u8 — handle both.
-    // All xoilac CDNs have mismatched SSL certs, so rejectUnauthorized:false is required.
+    // All scrapers now save the actual CDN URL directly (no channel proxy re-fetch needed).
+    // SSL certs on some CDNs are self-signed — rejectUnauthorized:false required.
     const https = require('https');
     const http  = require('http');
     const sslAgent = new https.Agent({ rejectUnauthorized: false });

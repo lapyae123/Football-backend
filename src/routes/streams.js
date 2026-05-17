@@ -36,13 +36,19 @@ module.exports = async function (fastify, opts) {
     const grouped = { SD: [], HD: [] };
     for (const row of rows) {
       const q = row.quality === 'HD' ? 'HD' : 'SD';
-      // m3u8 → proxy/stream (rewrites playlist, handles auth_key refresh)
-      // flv / xoilac channel proxy → proxy/flv (fetches fresh CDN URL + pipes with Referer/CORS)
-      const isM3u8    = row.url.includes('.m3u8');
-      const isFlv     = /\.flv(\?|$)/i.test(row.url) || row.url.includes('livepingscorex.com');
-      const proxyUrl  = isM3u8 ? `${apiBase}/api/proxy/stream/${row.id}`
-                      : isFlv  ? `${apiBase}/api/proxy/flv/${row.id}`
-                      : row.url;
+      // Routing:
+      //   m3u8 → proxy/stream  (only playlist through server; segments go direct to CDN)
+      //   flv  → proxy/flv     (pipes stream with correct Referer header)
+      //   other (livepingscorex.com iframe players) → raw URL, rendered as <iframe>
+      // The proxy is only needed when the CDN requires a specific Referer header.
+      // If DIRECT_STREAMS=true, skip the proxy so the browser fetches CDN URLs
+      // directly — useful when the server IP is geo-blocked by the CDN.
+      const isM3u8  = row.url.includes('.m3u8');
+      const isFlv   = /\.flv(\?|$)/i.test(row.url);
+      const direct  = process.env.DIRECT_STREAMS === 'true';
+      const proxyUrl = (isM3u8 && !direct) ? `${apiBase}/api/proxy/stream/${row.id}`
+                     : (isFlv  && !direct) ? `${apiBase}/api/proxy/flv/${row.id}`
+                     : row.url;
       grouped[q].push({
         id:           row.id,
         url:          proxyUrl,

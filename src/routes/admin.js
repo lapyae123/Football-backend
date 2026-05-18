@@ -66,46 +66,21 @@ const BAN_SIGNALS = {
       try {
         const r = await db.query("SELECT config FROM sources WHERE slug='socolive' LIMIT 1");
         const urls = r.rows[0]?.config?.base_urls;
-        if (Array.isArray(urls) && urls.length) return urls.slice(0, 2);
+        if (Array.isArray(urls) && urls.length) {
+          return urls
+            .filter((u) => u.enabled !== false)
+            .map((u) => (typeof u === 'string' ? u : u.url))
+            .filter(Boolean)
+            .slice(0, 2);
+        }
       } catch {}
       return ['https://www.socolive.tv/', 'https://www.barbaramassaad.com/'];
     },
-    // Two-stage check: page reachable + API endpoint responds with JSON
-    expect: async (body, pageUrl) => {
-      // Must be substantial HTML (not empty/blocked)
-      if (!body || body.length < 200) return false;
-      // Known CF challenge signatures
+    // IP ban check only — HTTP 200 + real HTML without CF challenge = not banned
+    expect: async (body) => {
+      if (!body || body.length < 500) return false;
       if (body.includes('Just a moment') || body.includes('cf-challenge-running')) return false;
-
-      // Try to extract API URL embedded in the page (PHP sport_data variable)
-      const apiMatch = body.match(/["']api["']\s*:\s*["'](https?:[^"']+football)["']/);
-      if (apiMatch) {
-        const apiUrl = apiMatch[1].replace(/\\/g, '');
-        try {
-          const ctrl  = new AbortController();
-          const timer = setTimeout(() => ctrl.abort(), 8000);
-          const origin = pageUrl ? new URL(pageUrl).origin : pageUrl;
-          const r = await fetch(`${apiUrl}/match/detail_live`, {
-            signal: ctrl.signal,
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-              'Accept':     'application/json, */*',
-              'Referer':    pageUrl || '',
-              'Origin':     origin  || '',
-            },
-          });
-          clearTimeout(timer);
-          const apiBody = await r.text();
-          // API healthy if it returns JSON with results key (even empty array)
-          return apiBody.includes('"results"') || apiBody.includes('"code"');
-        } catch (_) {
-          return false; // API unreachable even though homepage loaded
-        }
-      }
-
-      // No API URL found — site might be SPA with JS-rendered content.
-      // Accept if it returned meaningful HTML without challenge markers.
-      return body.includes('<html') || body.includes('<!DOCTYPE') || body.length > 2000;
+      return true;
     },
   },
 };

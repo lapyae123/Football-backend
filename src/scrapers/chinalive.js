@@ -210,9 +210,14 @@ const saveMatch = async (sched, streams, tabId, sourceId) => {
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'chinalive',$11,$12,now())
      ON CONFLICT (source_match_id, source_name) DO UPDATE
        SET status = CASE
-             -- Never downgrade: live→scheduled or finished→anything
-             WHEN matches.status = 'live'     AND EXCLUDED.status = 'scheduled' THEN 'live'
-             WHEN matches.status = 'finished'                                   THEN 'finished'
+             -- Never go backwards from finished
+             WHEN matches.status = 'finished' THEN 'finished'
+             -- Allow live→scheduled only when match hasn't kicked off yet (future time)
+             WHEN matches.status = 'live' AND EXCLUDED.status = 'scheduled'
+              AND EXCLUDED.scheduled_at IS NOT NULL
+              AND EXCLUDED.scheduled_at > NOW() + INTERVAL '5 minutes' THEN 'scheduled'
+             -- Otherwise keep live (prevents flickering mid-match)
+             WHEN matches.status = 'live' AND EXCLUDED.status = 'scheduled' THEN 'live'
              ELSE EXCLUDED.status
            END,
            title      = EXCLUDED.title,
@@ -363,10 +368,16 @@ const processMatch = async (match, { liveMap, allRooms, tabId, api_base, referer
   if (ms === 0 && liveRoomNums.length === 0 && preFetchRoomNums.length === 0) return null;
 
   const sourceId = String(match.scheduleId);
-  const dbStatus = liveRoomNums.length > 0 ? 'live'
-                 : isLiveStatus(ms)        ? 'live'
-                 : isFinishedStatus(ms)    ? 'finished'
-                 : preFetchRoomNums.length > 0 ? 'scheduled'
+
+  // Only treat live-room presence as 'live' if the match is within 15 min of kickoff.
+  // Streamers sometimes go live hours early for test broadcasts — don't promote those.
+  const LIVE_WINDOW_MS = 15 * 60 * 1000;
+  const matchStartsSoon = !match.matchTime || (now - match.matchTime) >= -LIVE_WINDOW_MS;
+  const roomsConfirmLive = liveRoomNums.length > 0 && matchStartsSoon;
+
+  const dbStatus = roomsConfirmLive     ? 'live'
+                 : isLiveStatus(ms)     ? 'live'
+                 : isFinishedStatus(ms) ? 'finished'
                  : 'scheduled';
 
   const sched = {

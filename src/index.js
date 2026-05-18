@@ -49,6 +49,8 @@ fastify.register(require('./routes/english'));
 fastify.register(require('./routes/servers'));
 fastify.register(require('./routes/proxy'));
 fastify.register(require('./routes/tv'));
+fastify.register(require('./routes/subscription'));
+fastify.register(require('./routes/auth').routes);
 
 require('./jobs/syncMatches');
 require('./jobs/socoliveSyncJob');

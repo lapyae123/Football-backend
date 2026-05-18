@@ -342,6 +342,20 @@
           <button class="btn btn-ghost btn-sm" onclick="loadSources()">↻ Refresh</button>
         </div>
       </div>
+      <!-- IP Ban Check -->
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:20px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+              <span>🛡️</span>
+              <b style="font-size:15px">IP Ban Check</b>
+            </div>
+            <div style="font-size:13px;color:var(--muted)">Test if your server IP is blocked by each scraper source</div>
+          </div>
+          <button class="btn btn-success btn-sm" onclick="checkBan('ban-results-src')">▶ Run Check</button>
+        </div>
+        <div id="ban-results-src"></div>
+      </div>
       <div id="sources-list"></div>
     </div>
 
@@ -857,12 +871,15 @@ async function toggleScraper(slug) {
   loadScrapers();
 }
 
-async function checkBan() {
-  const out = document.getElementById('ban-results');
-  out.innerHTML = '<span class="text-muted"><span class="spinner"></span> Checking…</span>';
+async function checkBan(resultId = 'ban-results') {
+  const out = document.getElementById(resultId);
+  if (!out) return;
+  out.innerHTML = '<span class="text-muted" style="font-size:13px"><span class="spinner"></span> Checking…</span>';
   try {
-    const results = await api('GET', '/scrapers/ban-check');
-    out.innerHTML = `<div class="ban-grid">${results.map(r => {
+    const data = await api('GET', '/scrapers/ban-check');
+    const results = Array.isArray(data) ? data : [];
+    if (!results.length) { out.innerHTML = `<span style="color:var(--red)">No results returned from server.</span>`; return; }
+    out.innerHTML = `<div class="ban-grid" style="margin-top:16px">${results.map(r => {
       const overall = r.overall;
       const badge = overall === 'ok' ? 'ok' : overall === 'warning' ? 'warn' : 'err';
       return `

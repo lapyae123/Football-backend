@@ -222,6 +222,10 @@
     <h1>⚽ Football Admin</h1>
     <p>Sign in to manage your streaming platform</p>
     <div class="form-group">
+      <label>API Server URL</label>
+      <input type="url" id="l-api" placeholder="https://your-backend.onrender.com" autocomplete="url">
+    </div>
+    <div class="form-group">
       <label>Username</label>
       <input type="text" id="l-user" placeholder="admin" autocomplete="username">
     </div>
@@ -247,6 +251,7 @@
       <div class="nav-item" onclick="goto('config')"><span class="nav-icon">⚙️</span> Config</div>
     </nav>
     <div class="sidebar-footer">
+      <div id="api-host-label" style="font-size:11px;color:var(--muted);padding:0 12px 8px;word-break:break-all;"></div>
       <button class="btn btn-ghost btn-full btn-sm" onclick="logout()">Sign Out</button>
     </div>
   </div>
@@ -478,7 +483,8 @@
 
 <script>
 // ── State ──────────────────────────────────────────────────────────────────────
-let TOKEN = localStorage.getItem('admin_token') || '';
+let TOKEN   = localStorage.getItem('admin_token') || '';
+let API_BASE = (localStorage.getItem('admin_api_base') || '').replace(/\/$/, '');
 let logPollers = {}; // { slug: intervalId }
 let tabs = [];
 
@@ -488,43 +494,56 @@ const api = async (method, path, body) => {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
   };
   if (body !== undefined) opts.body = JSON.stringify(body);
-  const res = await fetch('/api/admin' + path, opts);
+  const res = await fetch(API_BASE + '/api/admin' + path, opts);
   if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
   if (res.status === 204) return null;
   return res.json();
 };
 
 // ── Auth ───────────────────────────────────────────────────────────────────────
+// Pre-fill saved API URL
+window.addEventListener('DOMContentLoaded', () => {
+  const saved = localStorage.getItem('admin_api_base') || '';
+  document.getElementById('l-api').value = saved;
+});
+
 async function doLogin() {
-  const btn = document.getElementById('login-btn');
-  const err = document.getElementById('login-err');
-  const u   = document.getElementById('l-user').value.trim();
-  const p   = document.getElementById('l-pass').value;
+  const btn  = document.getElementById('login-btn');
+  const err  = document.getElementById('login-err');
+  const apiV = document.getElementById('l-api').value.trim().replace(/\/$/, '');
+  const u    = document.getElementById('l-user').value.trim();
+  const p    = document.getElementById('l-pass').value;
   err.textContent = '';
+  if (!apiV) { err.textContent = 'Enter the API server URL.'; return; }
   if (!u || !p) { err.textContent = 'Enter username and password.'; return; }
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner"></span> Signing in…';
   try {
-    const res = await fetch('/api/admin/login', {
+    const res = await fetch(apiV + '/api/admin/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: u, password: p }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Login failed');
-    TOKEN = data.token;
-    localStorage.setItem('admin_token', TOKEN);
+    TOKEN    = data.token;
+    API_BASE = apiV;
+    localStorage.setItem('admin_token',    TOKEN);
+    localStorage.setItem('admin_api_base', API_BASE);
     showApp();
   } catch (e) {
-    err.textContent = e.message;
+    err.textContent = e.message.includes('fetch') ? 'Cannot reach server — check the API URL.' : e.message;
   } finally {
     btn.disabled = false;
     btn.innerHTML = 'Sign In';
   }
 }
 
-document.getElementById('l-pass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
-document.getElementById('l-user').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('l-pass').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+  document.getElementById('l-user').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+  document.getElementById('l-api').addEventListener('keydown',  e => { if (e.key === 'Enter') document.getElementById('l-user').focus(); });
+});
 
 function logout() {
   TOKEN = '';
@@ -538,14 +557,18 @@ function logout() {
 async function showApp() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app').style.display = 'flex';
+  // Show connected server in sidebar
+  try {
+    const host = new URL(API_BASE).hostname;
+    document.getElementById('api-host-label').textContent = '🔗 ' + host;
+  } catch (_) {}
   // Pre-load tabs for filters/modals
   try { tabs = await api('GET', '/tabs'); } catch (_) {}
   populateTabFilters();
   loadDashboard();
 }
 
-if (TOKEN) {
-  // Try to use stored token immediately
+if (TOKEN && API_BASE) {
   showApp().catch(() => { TOKEN = ''; localStorage.removeItem('admin_token'); });
 }
 

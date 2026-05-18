@@ -19,7 +19,11 @@ fastify.register(require('@fastify/env'), {
   }
 });
 
-fastify.register(require('@fastify/cors'), { origin: true });
+// Allow all origins (public API) — admin panel on Vercel calls /api/admin/* cross-origin
+fastify.register(require('@fastify/cors'), {
+  origin: true,
+  credentials: true,
+});
 
 // Rate limiting — 200 req/min globally; login endpoint gets its own tighter limit
 fastify.register(require('@fastify/rate-limit'), {

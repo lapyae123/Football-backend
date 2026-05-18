@@ -9,10 +9,15 @@ const { run: runXoilac    } = require('../scrapers/xoilac');
 
 const SCRAPER_RUNNERS = { chinalive: runChinalive, socolive: runSocolive, xoilac: runXoilac };
 
-const JWT_SECRET   = process.env.JWT_SECRET        || 'football-admin-secret-dev';
-const ADMIN_USER   = process.env.ADMIN_USERNAME    || 'admin';
-const ADMIN_PASS   = process.env.ADMIN_PASSWORD    || '12345';
-const TOKEN_TTL    = '24h';
+const JWT_SECRET = process.env.JWT_SECRET;
+const ADMIN_USER = process.env.ADMIN_USERNAME || 'admin';
+const ADMIN_PASS = process.env.ADMIN_PASSWORD;
+const TOKEN_TTL  = '24h';
+
+if (!JWT_SECRET || !ADMIN_PASS) {
+  console.error('[admin] FATAL: JWT_SECRET and ADMIN_PASSWORD env vars must be set');
+  process.exit(1);
+}
 
 // ─── Auth middleware ──────────────────────────────────────────────────────────
 
@@ -164,8 +169,10 @@ const checkScraperAccess = async (slug) => {
 
 module.exports = async function adminRoutes(fastify) {
 
-  // ── Login ──────────────────────────────────────────────────────────────────
-  fastify.post('/api/admin/login', async (request, reply) => {
+  // ── Login (5 attempts / 10 min per IP) ────────────────────────────────────
+  fastify.post('/api/admin/login', {
+    config: { rateLimit: { max: 5, timeWindow: '10 minutes' } },
+  }, async (request, reply) => {
     const { username, password } = request.body || {};
     if (username !== ADMIN_USER || password !== ADMIN_PASS) {
       reply.code(401);

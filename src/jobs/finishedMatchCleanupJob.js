@@ -35,7 +35,8 @@ const markStuckLive = async (stuckLiveHours) => {
     `UPDATE matches SET status = 'finished'
      WHERE status = 'live'
        AND scheduled_at IS NOT NULL
-       AND scheduled_at < NOW() - INTERVAL '${stuckLiveHours} hours'`
+       AND scheduled_at < NOW() - ($1 * INTERVAL '1 hour')`,
+    [stuckLiveHours]
   );
   if (rowCount > 0) console.log(`[cleanupJob] Marked ${rowCount} stuck live → finished`);
 };
@@ -45,7 +46,8 @@ const deleteOldFinished = async (retentionHours) => {
   const { rowCount } = await db.query(
     `DELETE FROM matches
      WHERE status = 'finished'
-       AND created_at < NOW() - INTERVAL '${retentionHours} hours'`
+       AND created_at < NOW() - ($1 * INTERVAL '1 hour')`,
+    [retentionHours]
   );
   if (rowCount > 0) console.log(`[cleanupJob] Deleted ${rowCount} finished matches (older than ${retentionHours}h)`);
 };

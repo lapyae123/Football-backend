@@ -1,6 +1,7 @@
 require('dotenv').config();
 require('./config/scraperLog'); // intercept console before any scraper runs
 
+const path    = require('path');
 const fastify = require('fastify')({ logger: true });
 
 fastify.register(require('@fastify/env'), {
@@ -18,9 +19,22 @@ fastify.register(require('@fastify/env'), {
   }
 });
 
-fastify.register(require('@fastify/cors'), {
-  origin: true
+fastify.register(require('@fastify/cors'), { origin: true });
+
+// Rate limiting — 200 req/min globally; login endpoint gets its own tighter limit
+fastify.register(require('@fastify/rate-limit'), {
+  max: 200,
+  timeWindow: '1 minute',
+  skipOnError: true,
 });
+
+// Serve admin HTML at /admin
+fastify.register(require('@fastify/static'), {
+  root:   path.join(__dirname, 'public'),
+  prefix: '/admin/',
+  decorateReply: false,
+});
+fastify.get('/admin', (req, reply) => reply.sendFile('admin.html', path.join(__dirname, 'public')));
 
 fastify.register(require('./routes/config'));
 fastify.register(require('./routes/tabs'));

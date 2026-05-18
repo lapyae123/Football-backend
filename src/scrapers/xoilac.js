@@ -427,6 +427,15 @@ const run = async () => {
         if (LIVE_IDS.has(sid))          status = 'live';
         else if (FINISHED_IDS.has(sid)) status = 'finished';
       }
+      // Fallback: if API is unreachable and homepage says "not started" (sid=1),
+      // but kickoff time has already passed → treat as live so we fetch streams.
+      // Mirrors what matches.js does for the UI. Window: kickoff-15min to +150min.
+      if (status === 'scheduled' && scheduled_at) {
+        const msSinceKickoff = Date.now() - new Date(scheduled_at).getTime();
+        if (msSinceKickoff > -15 * 60 * 1000 && msSinceKickoff < 150 * 60 * 1000) {
+          status = 'live';
+        }
+      }
 
       // Only fetch match page for streams when live
       const streams = [];

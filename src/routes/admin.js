@@ -3,8 +3,8 @@ const db           = require('../config/database');
 const redis        = require('../config/redis');
 const scraperLog   = require('../config/scraperLog');
 const scraperState = require('../config/scraperState');
-const { run: runChinalive } = require('../scrapers/chinalive');
-const { run: runSocolive  } = require('../scrapers/socolive');
+const { run: runChinalive, runForMatch } = require('../scrapers/chinalive');
+const { run: runSocolive               } = require('../scrapers/socolive');
 
 const SCRAPER_RUNNERS = { chinalive: runChinalive, socolive: runSocolive };
 
@@ -484,6 +484,60 @@ module.exports = async function adminRoutes(fastify) {
     }
   });
 
+  // ── Scraper: refresh stream URLs for all live china matches ──────────────────
+  fastify.post('/api/admin/scrapers/chinalive/run-live', { preHandler: requireJwt }, async (request, reply) => {
+    const { rows } = await db.query(
+      `SELECT id, home_team, away_team FROM matches
+       WHERE source_name = 'chinalive' AND status = 'live'
+       ORDER BY scheduled_at ASC`
+    );
+
+    if (!rows.length) {
+      return { status: 'no_live_matches', refreshed: [] };
+    }
+
+    reply.code(202);
+
+    // Fire and forget — refresh all live matches in parallel (fast mode)
+    Promise.allSettled(
+      rows.map((m) =>
+        runForMatch(m.id, { fast: true })
+          .then(() => bust(`streams:${m.id}`))
+          .catch((err) => console.error(`[admin] run-live error ${m.id}:`, err.message))
+      )
+    );
+
+    return {
+      status: 'started',
+      refreshed: rows.map((m) => ({ id: m.id, match: `${m.home_team} vs ${m.away_team}` })),
+    };
+  });
+
+  // ── Scraper: refresh stream URLs for one specific match ────────────────────
+  fastify.post('/api/admin/matches/:id/scrape', { preHandler: requireJwt }, async (request, reply) => {
+    const { id } = request.params;
+
+    const matchRes = await db.query(
+      "SELECT home_team, away_team, source_name FROM matches WHERE id = $1 LIMIT 1",
+      [id]
+    );
+    if (!matchRes.rows.length) { reply.code(404); return { error: 'Match not found' }; }
+
+    const m = matchRes.rows[0];
+    if (m.source_name !== 'chinalive') {
+      reply.code(400);
+      return { error: 'On-demand scrape only supported for china-live matches' };
+    }
+
+    reply.code(202);
+
+    runForMatch(id, { fast: true })
+      .then(() => bust(`streams:${id}`))
+      .catch((err) => console.error(`[admin] match scrape error ${id}:`, err.message));
+
+    return { status: 'started', match: `${m.home_team} vs ${m.away_team}` };
+  });
+
   // ── Scraper: live logs ─────────────────────────────────────────────────────
   fastify.get('/api/admin/scrapers/:slug/logs', { preHandler: requireJwt }, async (request) => {
     const { slug } = request.params;
@@ -502,6 +556,266 @@ module.exports = async function adminRoutes(fastify) {
       last_run_at: s.lastRunAt  ? new Date(s.lastRunAt).toISOString()  : null,
       last_result: s.lastResult ?? null,
     };
+  });
+
+  // ── Scraper: schedule config ───────────────────────────────────────────────
+  // GET  /api/admin/scrapers/:slug/schedule
+  //   Returns the scheduler fields for a source:
+  //     active_hours      { from: "HH:MM", to: "HH:MM" } | null
+  //     sync_interval_ms  number | null
+  //     is_active         boolean
+  fastify.get('/api/admin/scrapers/:slug/schedule', { preHandler: requireJwt }, async (request, reply) => {
+    const { slug } = request.params;
+    const { rows } = await db.query(
+      `SELECT id, name, slug, is_active, config FROM sources WHERE slug = $1 LIMIT 1`,
+      [slug]
+    );
+    if (!rows.length) { reply.code(404); return { error: 'Scraper not found' }; }
+    const { id, name, is_active, config } = rows[0];
+    return {
+      id,
+      name,
+      slug,
+      is_active,
+      active_hours:     config?.active_hours     ?? null,
+      sync_interval_ms: config?.sync_interval_ms ?? null,
+    };
+  });
+
+  // PUT  /api/admin/scrapers/:slug/schedule
+  //   Body (all optional):
+  //     active_hours      { from: "HH:MM", to: "HH:MM" } | null  (null removes the window)
+  //     sync_interval_ms  number (≥10000 ms) | null               (null → use env-var default)
+  //     is_active         boolean
+  //
+  //   Merges into sources.config so other fields (api_base, base_urls…) are untouched.
+  fastify.put('/api/admin/scrapers/:slug/schedule', { preHandler: requireJwt }, async (request, reply) => {
+    const { slug } = request.params;
+    const { active_hours, sync_interval_ms, is_active } = request.body || {};
+
+    // Validate active_hours shape
+    if (active_hours !== undefined && active_hours !== null) {
+      const { from, to } = active_hours || {};
+      const HH_MM = /^\d{2}:\d{2}$/;
+      if (!HH_MM.test(from) || !HH_MM.test(to)) {
+        reply.code(400);
+        return { error: 'active_hours.from and active_hours.to must be "HH:MM"' };
+      }
+    }
+
+    // Validate sync_interval_ms
+    if (sync_interval_ms !== undefined && sync_interval_ms !== null) {
+      if (!Number.isFinite(sync_interval_ms) || sync_interval_ms < 10000) {
+        reply.code(400);
+        return { error: 'sync_interval_ms must be a number ≥ 10000' };
+      }
+    }
+
+    // Fetch current source
+    const srcRes = await db.query(
+      `SELECT id, config, is_active FROM sources WHERE slug = $1 LIMIT 1`,
+      [slug]
+    );
+    if (!srcRes.rows.length) { reply.code(404); return { error: 'Scraper not found' }; }
+    const current = srcRes.rows[0];
+
+    // Merge only the schedule-related keys into existing config
+    const merged = { ...(current.config || {}) };
+    if (active_hours !== undefined) {
+      if (active_hours === null) delete merged.active_hours;
+      else merged.active_hours = active_hours;
+    }
+    if (sync_interval_ms !== undefined) {
+      if (sync_interval_ms === null) delete merged.sync_interval_ms;
+      else merged.sync_interval_ms = sync_interval_ms;
+    }
+
+    const newIsActive = is_active !== undefined ? is_active : current.is_active;
+
+    const { rows } = await db.query(
+      `UPDATE sources
+       SET config    = $1::jsonb,
+           is_active = $2
+       WHERE slug = $3
+       RETURNING id, name, slug, is_active, config`,
+      [JSON.stringify(merged), newIsActive, slug]
+    );
+
+    return {
+      id:               rows[0].id,
+      name:             rows[0].name,
+      slug:             rows[0].slug,
+      is_active:        rows[0].is_active,
+      active_hours:     rows[0].config?.active_hours     ?? null,
+      sync_interval_ms: rows[0].config?.sync_interval_ms ?? null,
+    };
+  });
+
+  // ── User Management ───────────────────────────────────────────────────────
+
+  // GET /api/admin/users
+  // Query params:
+  //   search  — matches full_name, username, telegram_id (partial)
+  //   status  — 'active' | 'expired' | 'none' (no subscription)
+  //   plan    — plan name filter
+  //   sort    — 'created_at' | 'expires_at' | 'full_name'  (default: created_at)
+  //   order   — 'asc' | 'desc'  (default: desc)
+  //   page    — page number (default: 1)
+  //   limit   — rows per page (default: 50, max: 200)
+  fastify.get('/api/admin/users', { preHandler: requireJwt }, async (request) => {
+    const {
+      search = '',
+      status = '',
+      plan   = '',
+      sort   = 'created_at',
+      order  = 'desc',
+      page   = '1',
+      limit  = '50',
+    } = request.query;
+
+    const pageNum  = Math.max(1, parseInt(page,  10) || 1);
+    const limitNum = Math.min(200, Math.max(1, parseInt(limit, 10) || 50));
+    const offset   = (pageNum - 1) * limitNum;
+
+    const SORT_COLS  = { created_at: 'u.created_at', expires_at: 'sub.expires_at', full_name: 'u.full_name' };
+    const sortCol    = SORT_COLS[sort] || 'u.created_at';
+    const sortOrder  = order === 'asc' ? 'ASC' : 'DESC';
+
+    const conditions = [];
+    const params     = [];
+
+    if (search) {
+      params.push(`%${search}%`);
+      const n = params.length;
+      conditions.push(`(u.full_name ILIKE $${n} OR u.username ILIKE $${n} OR u.telegram_id::text LIKE $${n})`);
+    }
+
+    if (status === 'active') {
+      conditions.push(`(sub.status = 'active' AND sub.expires_at > NOW())`);
+    } else if (status === 'expired') {
+      conditions.push(`(sub.status = 'active' AND sub.expires_at <= NOW())`);
+    } else if (status === 'none') {
+      conditions.push(`sub.id IS NULL`);
+    }
+
+    if (plan) {
+      params.push(plan);
+      conditions.push(`p.name ILIKE $${params.length}`);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    const baseQuery = `
+      FROM tg_users u
+      LEFT JOIN LATERAL (
+        SELECT s.id, s.status, s.expires_at, s.plan_id
+        FROM subscriptions s
+        WHERE s.user_id = u.id
+        ORDER BY s.expires_at DESC LIMIT 1
+      ) sub ON true
+      LEFT JOIN subscription_plans p ON p.id = sub.plan_id
+      ${where}
+    `;
+
+    const [dataRes, countRes] = await Promise.all([
+      db.query(
+        `SELECT u.id, u.telegram_id, u.full_name, u.username, u.phone,
+                u.created_at, u.updated_at,
+                sub.status AS sub_status, sub.expires_at,
+                p.name AS plan_name
+         ${baseQuery}
+         ORDER BY ${sortCol} ${sortOrder} NULLS LAST
+         LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+        [...params, limitNum, offset]
+      ),
+      db.query(`SELECT COUNT(*) AS total ${baseQuery}`, params),
+    ]);
+
+    return {
+      users:      dataRes.rows,
+      total:      parseInt(countRes.rows[0].total, 10),
+      page:       pageNum,
+      limit:      limitNum,
+      totalPages: Math.ceil(parseInt(countRes.rows[0].total, 10) / limitNum),
+    };
+  });
+
+  // GET /api/admin/users/:id  — single user + subscription history
+  fastify.get('/api/admin/users/:id', { preHandler: requireJwt }, async (request, reply) => {
+    const { id } = request.params;
+
+    const [userRes, subsRes, txnRes] = await Promise.all([
+      db.query(
+        `SELECT u.id, u.telegram_id, u.full_name, u.username, u.phone,
+                u.created_at, u.updated_at,
+                s.status AS sub_status, s.expires_at, s.started_at,
+                p.name AS plan_name
+         FROM tg_users u
+         LEFT JOIN LATERAL (
+           SELECT s.status, s.expires_at, s.started_at, s.plan_id
+           FROM subscriptions s WHERE s.user_id = u.id
+           ORDER BY s.expires_at DESC LIMIT 1
+         ) s ON true
+         LEFT JOIN subscription_plans p ON p.id = s.plan_id
+         WHERE u.id = $1`,
+        [id]
+      ),
+      db.query(
+        `SELECT s.id, s.status, s.started_at, s.expires_at, s.created_at,
+                p.name AS plan_name, p.duration_days, p.price, p.currency
+         FROM subscriptions s
+         JOIN subscription_plans p ON p.id = s.plan_id
+         WHERE s.user_id = $1
+         ORDER BY s.created_at DESC`,
+        [id]
+      ),
+      db.query(
+        `SELECT t.id, t.amount, t.currency, t.payment_method, t.status,
+                t.created_at, t.verified_at, t.verified_by, t.rejection_reason,
+                p.name AS plan_name
+         FROM transactions t
+         JOIN subscription_plans p ON p.id = t.plan_id
+         WHERE t.user_id = $1
+         ORDER BY t.created_at DESC`,
+        [id]
+      ),
+    ]);
+
+    if (!userRes.rows.length) { reply.code(404); return { error: 'User not found' }; }
+
+    return {
+      ...userRes.rows[0],
+      subscriptions: subsRes.rows,
+      transactions:  txnRes.rows,
+    };
+  });
+
+  // PUT /api/admin/users/:id  — update user fields
+  fastify.put('/api/admin/users/:id', { preHandler: requireJwt }, async (request, reply) => {
+    const { id }                             = request.params;
+    const { full_name, username, phone } = request.body || {};
+
+    const { rows } = await db.query(
+      `UPDATE tg_users
+       SET full_name  = COALESCE($1, full_name),
+           username   = COALESCE($2, username),
+           phone      = COALESCE($3, phone),
+           updated_at = NOW()
+       WHERE id = $4
+       RETURNING id, telegram_id, full_name, username, phone, updated_at`,
+      [full_name, username, phone, id]
+    );
+    if (!rows.length) { reply.code(404); return { error: 'User not found' }; }
+    return rows[0];
+  });
+
+  // DELETE /api/admin/users/:id  — remove user and cascade subscriptions
+  fastify.delete('/api/admin/users/:id', { preHandler: requireJwt }, async (request, reply) => {
+    const { id } = request.params;
+    const { rowCount } = await db.query('DELETE FROM tg_users WHERE id = $1', [id]);
+    if (!rowCount) { reply.code(404); return { error: 'User not found' }; }
+    reply.code(204);
+    return null;
   });
 
   // ── API Test Runner ────────────────────────────────────────────────────────

@@ -401,7 +401,7 @@ const processMatch = async (match, { liveMap, allRooms, tabId, api_base, referer
       .sort((a, b) => b.views - a.views);
 
     for (let rank = 0; rank < sortedRooms.length; rank++) {
-      await jitter(300, 800);
+      if (!ctx.fast) await jitter(300, 800);
       const streams = await fetchStreams(sortedRooms[rank].rn, api_base, referer).catch(() => []);
       for (const s of streams) {
         const isHLS = s.url.includes('.m3u8');
@@ -466,4 +466,81 @@ const run = async () => {
   console.log('[chinalive] Scrape complete');
 };
 
-module.exports = { run };
+// ─── Schedule-only sync (no stream fetching) ─────────────────────────────────
+// Saves today's match metadata to DB so pre-warm timers can be scheduled.
+
+const syncSchedule = async () => {
+  console.log('[chinalive] Syncing schedule…');
+  const tabId = await getTabId();
+  if (!tabId) return [];
+
+  const { api_base, referer } = await getSourceConfig();
+  const scheduleMatches = await fetchScheduleMatches(api_base, referer);
+  const now = Date.now();
+  const cutoff = now - 4 * 60 * 60 * 1000;
+
+  const saved = [];
+  for (const match of scheduleMatches) {
+    const ms = match.matchStatus ?? 0;
+    if (match.matchTime && match.matchTime < cutoff) continue;
+    if (ms === -9999 || ms === -14 || isFinishedStatus(ms)) continue;
+
+    const dbStatus = isLiveStatus(ms) ? 'live' : 'scheduled';
+    const sched = {
+      home_team:    match.hostName    || '',
+      away_team:    match.guestName   || '',
+      league:       match.subCateName || null,
+      home_logo:    absoluteLogo(match.hostIcon),
+      away_logo:    absoluteLogo(match.guestIcon),
+      scheduled_at: match.matchTime ? new Date(match.matchTime).toISOString() : null,
+      score_home:   match.hostScore  != null ? Number(match.hostScore)  : null,
+      score_away:   match.guestScore != null ? Number(match.guestScore) : null,
+      db_status:    dbStatus,
+    };
+    try {
+      await saveMatch(sched, [], tabId, String(match.scheduleId));
+      saved.push({ sourceId: String(match.scheduleId), matchTime: match.matchTime, status: dbStatus });
+    } catch (err) {
+      console.error(`[chinalive] syncSchedule save error ${match.scheduleId}:`, err.message);
+    }
+  }
+
+  await markFinished();
+  console.log(`[chinalive] Schedule sync complete — ${saved.length} matches`);
+  return saved;
+};
+
+// ─── On-demand / pre-warm scrape for a single match ──────────────────────────
+// dbMatchId: UUID from the matches table.
+// fast=true  → no jitter (user is waiting)
+// fast=false → small jitter (background pre-warm)
+
+const runForMatch = async (dbMatchId, { fast = true } = {}) => {
+  const r = await db.query(
+    "SELECT source_match_id FROM matches WHERE id = $1 AND source_name = 'chinalive' LIMIT 1",
+    [dbMatchId]
+  );
+  if (!r.rows[0]) return false;
+  const sourceMatchId = r.rows[0].source_match_id;
+
+  const tabId = await getTabId();
+  if (!tabId) return false;
+
+  const { api_base, referer } = await getSourceConfig();
+  const [scheduleMatches, roomsResult] = await Promise.all([
+    fetchScheduleMatches(api_base, referer),
+    fetchRooms(api_base, referer).catch(() => null),
+  ]);
+  if (!roomsResult) return false;
+
+  const match = scheduleMatches.find((m) => String(m.scheduleId) === sourceMatchId);
+  if (!match) return false;
+
+  const now = Date.now();
+  const ctx = { liveMap: roomsResult.liveMap, allRooms: roomsResult.allRooms, tabId, api_base, referer, now, fast };
+  await processMatch(match, ctx);
+  console.log(`[chinalive] runForMatch done — ${match.hostName} vs ${match.guestName} (fast=${fast})`);
+  return true;
+};
+
+module.exports = { run, syncSchedule, runForMatch };

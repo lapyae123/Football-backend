@@ -4,8 +4,8 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
   max: 8,
-  idleTimeoutMillis: 10000,      // evict idle connections aggressively before Neon drops them
-  connectionTimeoutMillis: 10000,
+  idleTimeoutMillis: 10000,
+  connectionTimeoutMillis: 30000, // Neon free tier needs up to 20s to wake from suspension
 });
 
 pool.on('error', (err) => {
@@ -21,24 +21,21 @@ const isConnErr = (err) =>
   /ECONNRESET|EPIPE|Connection terminated|terminating connection|server closed/i.test(err.message || '');
 
 const query = async (text, params) => {
-  const maxAttempts = 4;
+  const maxAttempts = 3;
   let lastErr;
   for (let i = 0; i < maxAttempts; i++) {
     let client;
     try {
       client = await pool.connect();
-      // Suppress unhandled 'error' events on the checked-out client —
-      // these fire when Neon drops the connection mid-query and would
-      // otherwise crash the process as an uncaught exception.
       client.removeAllListeners('error');
       client.on('error', () => {});
       const result = await client.query(text, params);
       client.release();
       return result;
     } catch (err) {
-      if (client) client.release(true); // destroy bad connection
+      if (client) client.release(true);
       if (isConnErr(err) && i < maxAttempts - 1) {
-        await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+        await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
         lastErr = err;
         continue;
       }
@@ -47,5 +44,10 @@ const query = async (text, params) => {
   }
   throw lastErr;
 };
+
+// Wake up Neon immediately on startup, then keep alive every 4 min
+const wakeUp = () => pool.query('SELECT 1').catch(() => {});
+wakeUp();
+setInterval(wakeUp, 4 * 60 * 1000);
 
 module.exports = { query, pool };

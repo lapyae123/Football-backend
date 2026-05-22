@@ -639,23 +639,24 @@ const saveMatchToDB = async (match, tabId) => {
     matchId = existing.rows[0].id;
     await db.query(
       `UPDATE matches SET
-         status       = CASE WHEN status = 'finished' THEN 'finished' ELSE $1 END,
-         score_home   = $2, score_away   = $3, elapsed_minutes = $4,
-         home_logo    = $5, away_logo    = $6,
-         league       = COALESCE($7::text, league)
+         status          = CASE WHEN status = 'finished' THEN 'finished' ELSE $1 END,
+         score_home      = $2, score_away   = $3, elapsed_minutes = $4,
+         home_logo       = $5, away_logo    = $6,
+         league          = COALESCE($7::text, league),
+         stream_page_url = COALESCE($9::text, stream_page_url)
        WHERE id = $8`,
       [match.status, match.score_home, match.score_away, match.elapsed ?? null,
-       home_logo, away_logo, match.league || null, matchId]
+       home_logo, away_logo, match.league || null, matchId, match.matchPath || null]
     );
   } else {
     const ins = await db.query(
       `INSERT INTO matches (tab_id, title, home_team, away_team, home_logo, away_logo,
          league, status, scheduled_at, source_match_id, source_name,
-         score_home, score_away, elapsed_minutes, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'socolive',$11,$12,$13,now()) RETURNING id`,
+         score_home, score_away, elapsed_minutes, stream_page_url, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'socolive',$11,$12,$13,$14,now()) RETURNING id`,
       [tabId, match.title, match.home_team, match.away_team, home_logo, away_logo,
        match.league, match.status, match.scheduled_at, match.sourceId,
-       match.score_home, match.score_away, match.elapsed ?? null]
+       match.score_home, match.score_away, match.elapsed ?? null, match.matchPath || null]
     );
     matchId = ins.rows[0].id;
   }

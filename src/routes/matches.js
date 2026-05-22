@@ -1,8 +1,8 @@
 const db = require('../config/database');
 const redis = require('../config/redis');
 
-const MAIN_LIVE_SOURCE_TABS = ['soco-live'];
-const MAIN_LIVE_LIMIT = 15;
+const MAIN_LIVE_SOURCE_TABS = ['soco-live', 'china-live'];
+const MAIN_LIVE_LIMIT = 80;
 
 module.exports = async function (fastify, opts) {
   fastify.get('/api/matches', async (request, reply) => {
@@ -62,6 +62,9 @@ module.exports = async function (fastify, opts) {
          JOIN tabs t ON m.tab_id = t.id
          WHERE t.slug IN (${placeholders})
            AND t.is_active = TRUE
+           AND m.status != 'finished'
+           AND (m.scheduled_at IS NULL OR m.scheduled_at > NOW() - INTERVAL '3 hours')
+           AND (m.scheduled_at IS NULL OR m.scheduled_at < NOW() + INTERVAL '24 hours')
          ORDER BY
            CASE m.status WHEN 'live' THEN 0 WHEN 'scheduled' THEN 1 ELSE 2 END ASC,
            CASE
@@ -124,7 +127,7 @@ module.exports = async function (fastify, opts) {
     const result = await db.query(
       `SELECT id, tab_id, title, home_team, away_team, home_logo, away_logo,
               status, scheduled_at, score_home, score_away, elapsed_minutes,
-              source_match_id, source_name, created_at
+              source_match_id, source_name, stream_page_url, created_at
        FROM matches WHERE id = $1`,
       [id]
     );

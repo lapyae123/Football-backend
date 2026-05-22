@@ -1,0 +1,3 @@
+- [Developer Docs File](project_developer_docs.md) — Myanmar-language DEVELOPER.md must be updated on every app logic change
+- [No git push without permission](feedback_git_push.md) — always test locally first, never push until user says so
+- [Frontend location](project_frontend.md) — streamzone Next.js app is the only frontend; admin at localhost:3000/admin

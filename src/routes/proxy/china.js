@@ -1,10 +1,9 @@
 // China Live proxy — completely different from SOCO/TV:
 //   • Self-signed / mismatched SSL certs  → rejectUnauthorized: false
-//   • CDN requires both Referer + Origin  → must use https module (fetch() can't bypass SSL)
+//   • CDN requires Referer + Origin on ALL requests (master, child playlists, segments)
+//   • Must use https module (fetch() can't bypass SSL)
 //   • CDN tokens in URLs (auth_key=...)   → tokens expire, URLs refresh every ~30 min
-//   • Master playlist uses two CDN tiers:
-//       - pullsgp (origin CDN): needs Referer — relative URLs → route through /china-ts
-//       - livehwc4 (delivery CDN): CORS:* — absolute URLs → browser fetches directly
+//   • All URLs (absolute or relative) routed through our proxy — browser cannot set Referer
 
 const https = require('https');
 const http  = require('http');
@@ -41,12 +40,17 @@ const fetchM3u8 = (url) => {
 };
 
 // ─── Rewrite China m3u8 URLs ──────────────────────────────────────────────────
-// Absolute URLs (delivery CDN, CORS:*) → browser fetches directly — no proxy hop.
-// Relative URLs (origin CDN, needs Referer) → route through /china-ts proxy.
+// All China CDN URLs (absolute or relative) must go through our proxy because
+// the CDN requires Referer: https://yyzbw8.live/ on every request — the browser
+// cannot send this header directly.
+// Child playlists (.m3u8 lines) → china-m3u8 (adds Referer, rewrites segments)
+// Segment lines (.ts / other)   → china-ts   (adds Referer, pipes binary)
 const rewriteM3u8 = (body, base, basePath, apiBase) =>
   body.replace(/^([^#\r\n].+)$/gm, (line) => {
-    if (line.startsWith('http')) return line;
-    const abs = line.startsWith('/') ? `${base.origin}${line}` : `${basePath}${line}`;
+    const abs = line.startsWith('http') ? line
+              : line.startsWith('/')    ? `${base.origin}${line}`
+              : `${basePath}${line}`;
+    if (abs.includes('.m3u8')) return `${apiBase}/api/proxy/china-m3u8?url=${encodeURIComponent(abs)}`;
     return `${apiBase}/api/proxy/china-ts?url=${encodeURIComponent(abs)}`;
   });
 
@@ -71,10 +75,13 @@ const chinaProxy = async (fastify) => {
 
     const base     = new URL(decoded);
     const basePath = base.href.substring(0, base.href.lastIndexOf('/') + 1);
+    const apiBase  = (process.env.BACKEND_URL || `${request.protocol}://${request.headers.host}`).replace(/\/$/, '');
     body = body.replace(/^([^#\r\n].+)$/gm, (line) => {
-      if (line.startsWith('http')) return line;
-      if (line.startsWith('/')) return `${base.origin}${line}`;
-      return `${basePath}${line}`;
+      const abs = line.startsWith('http') ? line
+                : line.startsWith('/')    ? `${base.origin}${line}`
+                : `${basePath}${line}`;
+      if (abs.includes('.m3u8')) return `${apiBase}/api/proxy/china-m3u8?url=${encodeURIComponent(abs)}`;
+      return `${apiBase}/api/proxy/china-ts?url=${encodeURIComponent(abs)}`;
     });
 
     return reply

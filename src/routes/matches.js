@@ -90,7 +90,15 @@ module.exports = async function (fastify, opts) {
              AND t.is_active = TRUE
              AND m.status != 'finished'
              AND (m.scheduled_at IS NULL OR m.scheduled_at > NOW() - INTERVAL '3 hours')
-             AND (m.scheduled_at IS NULL OR m.scheduled_at < NOW() + INTERVAL '24 hours')
+             AND (
+               m.scheduled_at IS NULL
+               OR m.scheduled_at < NOW() + INTERVAL '24 hours'
+               OR m.league ILIKE '%world cup%' OR m.league ILIKE '%世界杯%'
+               OR m.league ILIKE '%champions league%' OR m.league ILIKE '%欧冠%'
+               OR m.league ILIKE '%europa league%'
+               OR m.league ILIKE '%euro %' OR m.league ILIKE '%uefa euro%'
+               OR m.league ILIKE '%copa america%'
+             )
          ) combined
          ORDER BY
            priority ASC,

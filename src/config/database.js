@@ -1,4 +1,9 @@
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
+
+// Force timestamp without timezone (OID 1114) to be treated as UTC.
+// By default node-postgres parses these as local server time, which causes a
+// 30-min countdown error for Myanmar users (UTC+6:30) when times are stored in UTC.
+types.setTypeParser(1114, (val) => val ? new Date(val + 'Z').toISOString() : null);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,

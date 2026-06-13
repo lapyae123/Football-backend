@@ -34,20 +34,27 @@ const getIntervalMs = (cfg) => {
   return DEFAULT_INTERVAL_MS;
 };
 
+const runScraper = async () => {
+  if (scraperState.isRunning(SLUG)) return false;
+  scraperState.start(SLUG);
+  try {
+    await run();
+    scraperState.finish(SLUG, 'ok');
+    return true;
+  } catch (err) {
+    console.error('[socoliveSyncJob] Failed:', err.message);
+    scraperState.finish(SLUG, 'error', err.message);
+    return false;
+  }
+};
+
 const tick = async () => {
   const src = await getSourceConfig();
   if (await shouldRun(src)) {
     if (scraperState.isRunning(SLUG)) {
       console.log(`[socoliveSyncJob] Skipped — already running`);
     } else {
-      scraperState.start(SLUG);
-      try {
-        await run();
-        scraperState.finish(SLUG, 'ok');
-      } catch (err) {
-        console.error('[socoliveSyncJob] Failed:', err.message);
-        scraperState.finish(SLUG, 'error', err.message);
-      }
+      await runScraper();
     }
   } else {
     scraperState.finish(SLUG, 'skipped');
@@ -55,5 +62,29 @@ const tick = async () => {
   setTimeout(tick, getIntervalMs(src.config));
 };
 
+// Pre-match trigger: run scraper up to 5 min before any soco-live match kicks off
+const preMatchCheck = async () => {
+  try {
+    const res = await db.query(
+      `SELECT m.id FROM matches m
+       JOIN tabs t ON t.id = m.tab_id
+       WHERE t.slug = $1
+         AND m.status = 'scheduled'
+         AND m.scheduled_at BETWEEN NOW() - INTERVAL '1 minute' AND NOW() + INTERVAL '5 minutes'
+       LIMIT 1`,
+      [TAB_SLUG]
+    );
+    if (res.rows.length > 0) {
+      console.log('[socoliveSyncJob] Pre-match: upcoming match detected, triggering early scrape');
+      await runScraper();
+    }
+  } catch (err) {
+    console.error('[socoliveSyncJob] Pre-match check error:', err.message);
+  }
+  setTimeout(preMatchCheck, 60 * 1000);
+};
+
 // Delay first run 15s so chinalive (HTTP) starts first before Playwright browser launches
 setTimeout(tick, 15 * 1000);
+// Pre-match check starts 30s after boot (after main tick fires)
+setTimeout(preMatchCheck, 30 * 1000);

@@ -91,7 +91,7 @@ bot.start(async (ctx) => {
     );
   } else {
     await ctx.replyWithMarkdown(
-      `⚽ *Rangoon TV မှ ကြိုဆိုပါသည်, ${name}!*\n\n` +
+      `⚽ *BalloneTV မှ ကြိုဆိုပါသည်, ${name}!*\n\n` +
       `ဘောလုံး တိုက်ရိုက်ထုတ်လွှင့်မှုများကို အချိန်မရွေး ကြည့်ရှုနိုင်သည်။\n\n` +
       `*📋 Plan များ* ကိုနှိပ်၍ စာရင်းသွင်းမှု package များကို ကြည့်ရှုပါ။`,
       Markup.keyboard([

@@ -60,6 +60,10 @@ module.exports = async (fastify) => {
 
     const markUnhealthy = () => {
       invalidateStream(id);
+      // China live token lifecycle is owned by the re-warm cycle — marking is_healthy=false
+      // here would race against re-warm and hide a stream that already has a fresh token.
+      // expireOldUrls() handles actual expiry; re-warm handles renewal.
+      if (source_name === 'chinalive') return;
       return db.query('UPDATE stream_urls SET is_healthy = false, expires_at = NOW() WHERE id = $1', [id]).catch(() => {});
     };
 

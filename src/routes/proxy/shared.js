@@ -31,6 +31,14 @@ const getStreamRecord = async (id) => {
 
 const invalidateStream = (id) => streamCache.delete(id);
 
+// After re-warm writes fresh CDN URLs for a match, bust all cached proxy entries for
+// that match so the next M3U8 request picks up the new token immediately.
+const invalidateMatchStreams = (matchId) => {
+  for (const [id, entry] of streamCache.entries()) {
+    if (entry.match_id === matchId) streamCache.delete(id);
+  }
+};
+
 // ─── m3u8 playlist response cache ────────────────────────────────────────────
 // HLS players re-fetch the playlist every 2-5 s. Without caching every viewer
 // causes a separate server→CDN round-trip. A 4-second cache means N concurrent
@@ -47,4 +55,4 @@ const getM3u8Cached = async (cdnUrl, fetcher) => {
   return body;
 };
 
-module.exports = { STREAM_UA, PRIVATE_IP_RE, getStreamRecord, invalidateStream, getM3u8Cached };
+module.exports = { STREAM_UA, PRIVATE_IP_RE, getStreamRecord, invalidateStream, invalidateMatchStreams, getM3u8Cached };

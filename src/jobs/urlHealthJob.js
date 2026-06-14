@@ -115,9 +115,13 @@ const runHealthCheck = async (failThreshold) => {
   let socoFailed  = false;
   let chinaFailed = false;
 
-  // Separate browser-only (skip check) from checkable streams
+  // Separate browser-only (skip check) from checkable streams.
+  // China live streams are fully managed by the re-warm cycle (chinaliveSyncJob) —
+  // health-checking them would race against token rotation and falsely mark healthy
+  // streams unhealthy. expireOldUrls() handles token expiry; re-warm handles renewal.
   const browserOnly = streams.filter((s) =>
-    s.url.includes('buzzscorelinez.com')
+    s.source_name === 'chinalive'
+    || s.url.includes('buzzscorelinez.com')
     || /[?&]auth_key=\d/.test(s.url)
     || /wsSecret=/.test(s.url)
     || s.url.includes('pullsgp.yyzb456.top')
@@ -131,7 +135,9 @@ const runHealthCheck = async (failThreshold) => {
     checkable.map(async (stream) => {
       const { ok, latency } = await checkUrl(stream.url, stream.source_name);
       const newFailCount = ok ? 0 : stream.fail_count + 1;
-      const isHealthy    = ok && newFailCount < failThreshold;
+      // Only hide a stream after consecutive failures — one transient error shouldn't
+      // remove all servers. Previously `ok && ...` meant first failure = immediate hide.
+      const isHealthy    = ok || newFailCount < failThreshold;
 
       if (!ok) {
         console.warn(`[urlHealthJob] UNHEALTHY: ${stream.url} (fail_count=${newFailCount})`);

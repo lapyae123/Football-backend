@@ -3,6 +3,7 @@ const redis        = require('../config/redis');
 const scraperState = require('../config/scraperState');
 const { syncSchedule, runForMatch } = require('../scrapers/chinalive');
 const { isWithinActiveHours } = require('../config/scraperSchedule');
+const { invalidateMatchStreams } = require('../routes/proxy/shared');
 
 const SLUG     = 'chinalive';
 const TAB_SLUG = 'china-live';
@@ -117,6 +118,7 @@ const scheduleRewarm = (dbMatchId, matchLabel) => {
       const ok = await runForMatch(dbMatchId, { fast: false });
       if (ok) {
         await warmMatchCache(dbMatchId);
+        invalidateMatchStreams(dbMatchId); // bust proxy streamCache so fresh tokens are used immediately
         console.log(`[chinaPrewarm] Re-warm done — ${matchLabel}`);
       } else {
         console.warn(`[chinaPrewarm] Re-warm returned false — ${matchLabel}, will retry`);
@@ -146,6 +148,7 @@ const schedulePrewarm = (dbMatchId, matchTime, matchLabel) => {
       .then(async (ok) => {
         if (ok) {
           await warmMatchCache(dbMatchId);
+          invalidateMatchStreams(dbMatchId);
           scheduleRewarm(dbMatchId, matchLabel);
         }
       })
@@ -160,6 +163,7 @@ const schedulePrewarm = (dbMatchId, matchTime, matchLabel) => {
       const ok = await runForMatch(dbMatchId, { fast: false });
       if (ok) {
         await warmMatchCache(dbMatchId);
+        invalidateMatchStreams(dbMatchId);
         console.log(`[chinaPrewarm] Pre-warm done — ${matchLabel}`);
         scheduleRewarm(dbMatchId, matchLabel);
       }
